@@ -1,0 +1,16 @@
+;;; Example .dir-locals.el for Feynman Chiron
+;;; Copy this to ~/learning/.dir-locals.el and edit with your values
+
+((org-mode . ((feynman-chiron-database-url . "postgresql://user:password@server:5432/chiron")
+              (feynman-chiron-learning-schema . "learning"))))
+
+;; This sets the base database URL and learning schema for all org files
+;; in this directory and subdirectories.
+;;
+;; Individual org files can still override these settings with file-local
+;; variables, or specify textbook sources:
+;;
+;; # Local Variables:
+;; # feynman-chiron-textbook-sources: (("textbook-name" . "schema-name"))
+;; # feynman-chiron-provider: anthropic
+;; # End:

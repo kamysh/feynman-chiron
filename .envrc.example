@@ -1,0 +1,31 @@
+# Example .envrc for Feynman Chiron
+# Copy this to your learning directory (e.g., ~/Learning/.envrc)
+
+# Base PostgreSQL database URL (required)
+# All learning files will use this database with different schemas
+export CHIRON_DATABASE_URL="postgresql://user:password@server:5432/chiron"
+
+# Alternative: Use .pgpass for password instead of putting it in the URL
+# If you have ~/.pgpass configured, omit password from URL:
+# export CHIRON_DATABASE_URL="postgresql://user@server:5432/chiron"
+#
+# ~/.pgpass format:
+# server:5432:chiron:user:password
+# or with wildcards:
+# server:*:*:user:password
+
+# Retrieve OpenAI API key from running Emacs server
+# chiron_storage.py uses OpenAI for embeddings
+# This allows storing keys in ONE place: ~/.emacs.d/my/api-keys.el
+# Requires Emacs server to be running (emacs --daemon or server-start)
+export OPENAI_API_KEY=$(emacsclient --eval '(bound-and-true-p api-keys-openai-key)' 2>/dev/null | tr -d '"' || echo "")
+
+# Alternative: Set API key directly (not recommended - duplicates keys)
+# export OPENAI_API_KEY="sk-proj-..."
+
+# Use Nix flake for Python environment
+use flake
+
+# After copying and editing, run:
+#   cd ~/Learning
+#   direnv allow
