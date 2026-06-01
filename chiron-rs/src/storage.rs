@@ -29,20 +29,7 @@ impl Storage {
     }
 
     async fn init_schema(&self) -> Result<()> {
-        // Extensions
-        self.client
-            .execute("CREATE EXTENSION IF NOT EXISTS vector", &[])
-            .await
-            .context("vector extension")?;
-        self.client
-            .execute("CREATE EXTENSION IF NOT EXISTS age", &[])
-            .await
-            .context("age extension")?;
-
-        if let Err(e) = self.client.execute("LOAD 'age'", &[]).await {
-            eprintln!("Warning: LOAD age failed: {}", e);
-        }
-
+        // Extensions (vector + age) are pre-installed by postgres-ai image.
         // AGE knowledge graph — dynamic SQL is fine with tokio-postgres
         let _ = self
             .client

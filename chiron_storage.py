@@ -49,25 +49,8 @@ class ChironStorage:
     
     def _init_schema(self):
         """Initialize database schema if not exists."""
+        # Extensions (vector + age) are pre-installed by postgres-ai image.
         with self.conn.cursor() as cur:
-            # Enable extensions
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            cur.execute("CREATE EXTENSION IF NOT EXISTS age;")
-
-            # Check if AGE is loaded by checking if create_graph function exists
-            cur.execute("""
-                SELECT COUNT(*) FROM pg_proc
-                WHERE proname = 'create_graph'
-                AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'ag_catalog')
-            """)
-            age_loaded = cur.fetchone()[0] > 0
-
-            if not age_loaded:
-                # Try to load AGE if not loaded
-                try:
-                    cur.execute("LOAD 'age';")
-                except psycopg2.errors.InsufficientPrivilege:
-                    raise RuntimeError("AGE extension is not loaded and you don't have permission to load it. Contact your database administrator.")
 
             # Create AGE graph for knowledge
             try:
