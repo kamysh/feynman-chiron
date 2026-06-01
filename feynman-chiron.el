@@ -224,13 +224,24 @@ MESSAGES should be in OpenAI format (will be converted if needed):
      (message "API call failed: %s" err)
      (signal (car err) (cdr err)))))
 
-;;; Python Backend Integration
+;;; Rust Backend Integration
 
-(defcustom feynman-chiron-backend-script nil
-  "Path to chiron_agent.py script (LangGraph-based Chiron agent).
-If nil, looks in default locations."
+(defcustom feynman-chiron-backend-program nil
+  "Path to the chiron-rs binary.
+If nil, looks for 'chiron-rs' on PATH and in the package directory."
   :type '(choice (const :tag "Auto-detect" nil)
-                 (file :tag "Path to script"))
+                 (file :tag "Path to binary"))
+  :group 'feynman-chiron)
+
+(defcustom feynman-chiron-endpoint-url nil
+  "Base URL for OpenAI-compatible LLM endpoint.
+Required when CHIRON_PROVIDER is 'openai-compat' (Groq, Mistral, Ollama, etc.).
+Examples:
+  Groq:   https://api.groq.com/openai
+  Ollama: http://localhost:11434/v1
+If nil, defaults to https://api.openai.com when provider is 'openai'."
+  :type '(choice (const :tag "Default (OpenAI)" nil)
+                 (string :tag "Endpoint URL"))
   :group 'feynman-chiron)
 
 (defvar-local feynman-chiron-database-url nil
@@ -280,20 +291,20 @@ The agent queries all specified sources.")
   :type 'string
   :group 'feynman-chiron)
 
-(defun feynman-chiron--find-backend-script ()
-  "Find the backend script."
-  (or feynman-chiron-backend-script
+(defun feynman-chiron--find-backend ()
+  "Find the chiron-rs binary."
+  (or feynman-chiron-backend-program
+      ;; Look in PATH first
+      (executable-find "chiron-rs")
+      ;; Then relative to the package directory
       (let ((candidates (list
-                        ;; Same directory as .el file
-                        (when load-file-name
-                          (expand-file-name "chiron_agent.py"
-                                          (file-name-directory load-file-name)))
-                        ;; Current directory
-                        "chiron_agent.py"
-                        "./chiron_agent.py"
-                        ;; User emacs directory
-                        "~/.emacs.d/chiron_agent.py"
-                        (expand-file-name "chiron_agent.py" user-emacs-directory))))
+                         (when load-file-name
+                           (expand-file-name
+                            "chiron-rs/target/release/chiron-rs"
+                            (file-name-directory load-file-name)))
+                         (expand-file-name
+                          "chiron-rs/target/release/chiron-rs"
+                          user-emacs-directory))))
         (seq-find #'file-exists-p candidates))))
 
 (defun feynman-chiron--build-db-url (schema)
@@ -341,41 +352,44 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
     (unless feynman-chiron-learning-schema
       (error "No learning schema configured. Set feynman-chiron-learning-schema in file-local variables"))
 
-    (let ((script (feynman-chiron--find-backend-script)))
-    (unless script
-      (error "Cannot find chiron_agent.py. Set feynman-chiron-backend-script"))
+    (let ((binary (feynman-chiron--find-backend)))
+    (unless binary
+      (error "Cannot find chiron-rs binary. Build it with: cd chiron-rs && cargo build --release"))
 
-    (unless (file-exists-p script)
-      (error "Backend script not found: %s" script))
-
-    (message "Starting Chiron agent: %s" script)
+    (message "Starting Chiron agent: %s" binary)
 
     ;; Normalize textbook sources for backend
     (let* ((normalized-sources (feynman-chiron--normalize-textbook-sources))
            ;; Get API keys from centralized api-keys.el (lazy-loaded)
            (openai-key (api-keys-get-openai))
            (anthropic-key (api-keys-get-anthropic))
+           (provider (feynman-chiron--get-provider))
+           ;; For openai-compat, use the openai key; for anthropic, the anthropic key
+           (chiron-api-key (if (eq provider 'anthropic) anthropic-key openai-key))
            (process-environment
             (append
              (list
-              (format "CHIRON_PROVIDER=%s" (feynman-chiron--get-provider))
+              (format "CHIRON_PROVIDER=%s" provider)
               (format "CHIRON_MODEL=%s" (feynman-chiron--model))
               (format "CHIRON_DATABASE_URL=%s" feynman-chiron-database-url)
               (format "CHIRON_LEARNING_SCHEMA=%s" feynman-chiron-learning-schema)
               (format "CHIRON_TEXTBOOK_SOURCES=%s"
                       (json-encode normalized-sources)))
-             ;; Add API keys if available
+             (when chiron-api-key
+               (list (format "CHIRON_API_KEY=%s" chiron-api-key)))
              (when openai-key
                (list (format "OPENAI_API_KEY=%s" openai-key)))
              (when anthropic-key
                (list (format "ANTHROPIC_API_KEY=%s" anthropic-key)))
+             (when feynman-chiron-endpoint-url
+               (list (format "CHIRON_ENDPOINT_URL=%s" feynman-chiron-endpoint-url)))
              process-environment)))
 
       (setq feynman-chiron-backend-process
             (make-process
              :name "chiron-agent"
              :buffer feynman-chiron-backend-buffer
-             :command (list "python3" script)
+             :command (list binary)
              :connection-type 'pipe
              :sentinel #'feynman-chiron--backend-sentinel))
 
