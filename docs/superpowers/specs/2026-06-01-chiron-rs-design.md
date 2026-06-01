@@ -15,7 +15,7 @@ the binary speaks the same stdin/stdout JSON protocol as the Python backend.
 
 - Eliminate Python runtime and langchain/langgraph dependency chain
 - Embed MiniLM sentence transformer (384 dims) via pure-Rust candle — no Python subprocess for embeddings
-- Support Anthropic Messages API and Groq (OpenAI-compatible) as LLM providers
+- Support Anthropic Messages API natively; any OpenAI-compatible endpoint (OpenAI, Groq, Mistral, Ollama, Mercury proxy, etc.) via a configurable base URL — adding a new provider requires no code changes
 - Preserve full feature parity: RAG, knowledge graph, checkpoints, mastery tracking
 
 ### Non-goals
@@ -63,8 +63,12 @@ All shared data types. No logic.
 
 ```rust
 pub enum Provider {
-    Anthropic { api_key: String, model: String },
-    Groq      { api_key: String, model: String },
+    Anthropic   { api_key: String, model: String },
+    OpenAICompat { base_url: String, api_key: String, model: String },
+    // Groq:    base_url = "https://api.groq.com/openai"
+    // Mistral: base_url = "https://api.mistral.ai"
+    // Ollama:  base_url = "http://localhost:11434/v1"
+    // Mercury: base_url = "<proxy url>"
 }
 
 pub enum Stage { Initial, Analyze, Probe, Evaluate, Complete }
@@ -116,10 +120,13 @@ pub async fn chat(provider: &Provider, messages: &[Message]) -> Result<String>
   - Body: `{ model, max_tokens: 1024, system, messages }`
   - Extract `.content[0].text`
 
-- `Provider::Groq` → POST `https://api.groq.com/openai/v1/chat/completions`
-  - Headers: `Authorization: Bearer <key>`
-  - Body: OpenAI chat completions format
+- `Provider::OpenAICompat` → POST `{base_url}/v1/chat/completions`
+  - Headers: `Authorization: Bearer <api_key>`
+  - Body: OpenAI chat completions format `{ model, messages }`
   - Extract `.choices[0].message.content`
+  - `base_url` is taken from `CHIRON_ENDPOINT_URL` env var; `api_key` from `CHIRON_API_KEY`
+  - Examples: Groq (`https://api.groq.com/openai`), Mistral (`https://api.mistral.ai`),
+    Ollama (`http://localhost:11434/v1`), Mercury proxy, OpenAI (`https://api.openai.com`)
 
 No SDK. Raw `reqwest` + `serde_json`. Timeouts: 30 s connect, 120 s read.
 
@@ -236,9 +243,15 @@ JSON gap parsing: attempt `serde_json::from_str`, fall back to `[]` on failure.
 Startup:
 
 ```rust
-// Read env: CHIRON_PROVIDER, CHIRON_MODEL, CHIRON_DATABASE_URL,
-//           CHIRON_LEARNING_SCHEMA, CHIRON_TEXTBOOK_SOURCES (JSON),
-//           OPENAI_API_KEY / ANTHROPIC_API_KEY / GROQ_API_KEY
+// Read env:
+//   CHIRON_PROVIDER        = "anthropic" | "openai-compat"  (default: anthropic)
+//   CHIRON_MODEL           = model name (required)
+//   CHIRON_API_KEY         = API key for selected provider
+//   CHIRON_ENDPOINT_URL    = base URL for openai-compat (required if provider=openai-compat)
+//   ANTHROPIC_API_KEY      = fallback if CHIRON_API_KEY unset and provider=anthropic
+//   CHIRON_DATABASE_URL    = PostgreSQL connection string (required)
+//   CHIRON_LEARNING_SCHEMA = schema name for learning state (required)
+//   CHIRON_TEXTBOOK_SOURCES = JSON map of textbook names to schema specs
 
 let embedder   = Embedder::new()?;
 let pool       = PgPoolOptions::new().connect(&db_url).await?;
