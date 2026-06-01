@@ -56,7 +56,7 @@ Set via file-local variables:
   :type 'string
   :group 'feynman-chiron)
 
-(defcustom feynman-chiron-anthropic-model "claude-3-5-sonnet-20241022"
+(defcustom feynman-chiron-anthropic-model "claude-sonnet-4-6"
   "Default Anthropic model."
   :type 'string
   :group 'feynman-chiron)
@@ -74,11 +74,11 @@ Set via file-local variables:
 (defvar feynman-chiron-buffer-name "*Feynman Chiron*"
   "Name of the Chiron learning buffer.")
 
-(defvar feynman-chiron-backend-process nil
-  "Python backend process for RAG retrieval.")
+(defvar-local feynman-chiron-backend-process nil
+  "Python backend process for this buffer.")
 
-(defvar feynman-chiron-state nil
-  "Current learning state.
+(defvar-local feynman-chiron-state nil
+  "Current learning state for this buffer.
 Plist containing:
   :concept - current concept being learned
   :stage - current stage (initial, explain, probe, refine, complete)
@@ -86,8 +86,8 @@ Plist containing:
   :gaps - identified gaps
   :mastered - alist of (concept . data)")
 
-(defvar feynman-chiron-prompt-marker nil
-  "Marker for start of current prompt.")
+(defvar-local feynman-chiron-prompt-marker nil
+  "Marker for start of current prompt in this buffer.")
 
 ;;; API Communication
 
@@ -225,12 +225,6 @@ MESSAGES should be in OpenAI format (will be converted if needed):
      (signal (car err) (cdr err)))))
 
 ;;; Python Backend Integration
-
-(defvar feynman-chiron-backend-process nil
-  "Python backend process for RAG retrieval.")
-
-(defvar feynman-chiron-backend-buffer " *feynman-backend*"
-  "Buffer for backend process output.")
 
 (defcustom feynman-chiron-backend-script nil
   "Path to chiron_agent.py script (LangGraph-based Chiron agent).

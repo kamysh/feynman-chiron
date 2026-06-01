@@ -10,6 +10,7 @@ Uses:
 Single database for everything.
 """
 
+import sys
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 import json
@@ -17,12 +18,14 @@ import os
 from typing import List, Dict, Optional
 import numpy as np
 
+EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 output dimension
+
 try:
-    from langchain_openai import OpenAIEmbeddings
+    from langchain_community.embeddings import HuggingFaceEmbeddings
     HAVE_EMBEDDINGS = True
 except ImportError:
     HAVE_EMBEDDINGS = False
-    print("WARNING: langchain_openai not found, embeddings disabled", file=sys.stderr)
+    print("WARNING: langchain_community not found, embeddings disabled", file=sys.stderr)
 
 
 class ChironStorage:
@@ -39,7 +42,7 @@ class ChironStorage:
         self.db_url = db_url
         self.conn = psycopg2.connect(db_url)
         self.conn.set_client_encoding('UTF8')
-        self.embeddings = OpenAIEmbeddings() if HAVE_EMBEDDINGS else None
+        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2") if HAVE_EMBEDDINGS else None
 
         # Initialize database schema
         self._init_schema()
@@ -80,23 +83,45 @@ class ChironStorage:
                     # This is a real invalid schema name error, re-raise it
                     raise
             
-            # Vector storage for textbook chunks
+            # Migrate embedding column if dimension changed (e.g. 1536 → 384)
             cur.execute("""
+                SELECT pg_catalog.format_type(a.atttypid, a.atttypmod)
+                FROM pg_attribute a
+                JOIN pg_class c ON a.attrelid = c.oid
+                WHERE c.relname = 'textbook_chunks'
+                  AND a.attname = 'embedding'
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+            """)
+            existing = cur.fetchone()
+            if existing and existing[0] != f'vector({EMBEDDING_DIM})':
+                print(
+                    f"Migrating textbook_chunks.embedding from {existing[0]} "
+                    f"to vector({EMBEDDING_DIM}). Re-ingest your textbooks.",
+                    file=sys.stderr,
+                )
+                cur.execute("DROP INDEX IF EXISTS textbook_chunks_embedding_idx;")
+                cur.execute("ALTER TABLE textbook_chunks DROP COLUMN embedding;")
+                cur.execute(f"ALTER TABLE textbook_chunks ADD COLUMN embedding vector({EMBEDDING_DIM});")
+                self.conn.commit()
+
+            # Vector storage for textbook chunks
+            cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS textbook_chunks (
                     id SERIAL PRIMARY KEY,
                     textbook_name TEXT NOT NULL,
                     page_number INTEGER,
                     chunk_text TEXT NOT NULL,
-                    embedding vector(1536),
+                    embedding vector({EMBEDDING_DIM}),
                     metadata JSONB,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            
+
             # Index for vector similarity search
             cur.execute("""
-                CREATE INDEX IF NOT EXISTS textbook_chunks_embedding_idx 
-                ON textbook_chunks 
+                CREATE INDEX IF NOT EXISTS textbook_chunks_embedding_idx
+                ON textbook_chunks
                 USING ivfflat (embedding vector_cosine_ops)
                 WITH (lists = 100);
             """)

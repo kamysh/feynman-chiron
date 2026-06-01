@@ -20,6 +20,9 @@
           psycopg2
           pypdf
           numpy
+          sentence-transformers
+          pytest
+          pytest-mock
         ]);
 
       in {

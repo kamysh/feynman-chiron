@@ -54,8 +54,8 @@ class ChironState(TypedDict):
     # Mastered concepts
     mastered_concepts: dict
     
-    # Textbook names to query
-    textbook_names: List[str]
+    # Textbook sources dict (name → schema) as decoded from JSON
+    textbook_sources: dict
 
 
 class ChironAgent:
@@ -76,7 +76,7 @@ class ChironAgent:
             )
         else:  # anthropic
             self.llm = ChatAnthropic(
-                model=model or "claude-3-5-sonnet-20241022",
+                model=model or "claude-sonnet-4-6",
                 temperature=0.3,
                 api_key=api_key or os.getenv("ANTHROPIC_API_KEY")
             )
@@ -145,7 +145,7 @@ class ChironAgent:
         all_results = []
         
         # Query each textbook source
-        for source_name, source_url in textbook_sources:
+        for source_name in textbook_sources:
             if source_name not in self.textbook_connections:
                 print(f"No connection to textbook '{source_name}'", file=sys.stderr)
                 continue
@@ -464,7 +464,7 @@ def main():
             learning_schema=learning_schema,
             textbook_sources=textbook_sources
         )
-        print(f"READY provider={provider} db={database_url} schema={learning_schema}", file=sys.stderr, flush=True)
+        print(f"READY provider={provider} db={database_url} schema={learning_schema}", flush=True)
     except Exception as e:
         print(f"ERROR: Failed to initialize agent: {e}", file=sys.stderr)
         import traceback
