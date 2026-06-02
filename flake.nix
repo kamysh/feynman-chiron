@@ -1,5 +1,5 @@
 {
-  description = "Feynman Chiron development environment";
+  description = "Feynman Chiron — Rust agent backend + Python textbook ingest";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -11,7 +11,25 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        # Python env: kept for textbook ingestion (chiron_storage.py)
+        # Native C deps shared between package build and dev shell
+        nativeDeps = [ pkgs.pkg-config ];
+        buildDeps  = [ pkgs.oniguruma pkgs.openssl ];  # tokenizers "onig" feature; hf-hub native-tls
+
+        # ── Rust package ─────────────────────────────────────────────────────
+        chiron-rs = pkgs.rustPlatform.buildRustPackage {
+          pname   = "chiron-rs";
+          version = "0.1.0";
+          src     = ./chiron-rs;
+
+          cargoLock.lockFile = ./chiron-rs/Cargo.lock;
+
+          nativeBuildInputs = nativeDeps;
+          buildInputs       = buildDeps;
+
+          PKG_CONFIG_PATH = "${pkgs.oniguruma}/lib/pkgconfig:${pkgs.openssl.dev}/lib/pkgconfig";
+        };
+
+        # ── Python env for textbook ingestion (chiron_storage.py) ────────────
         pythonEnv = pkgs.python3.withPackages (ps: with ps; [
           langchain-community
           psycopg2
@@ -23,32 +41,30 @@
         ]);
 
       in {
+        # nix build  →  result/bin/chiron-rs
+        packages.default = chiron-rs;
+        packages.chiron-rs = chiron-rs;
+
+        # nix develop
         devShells.default = pkgs.mkShell {
           buildInputs = [
             pythonEnv
-            # Rust toolchain for chiron-rs
             pkgs.cargo
             pkgs.rustc
             pkgs.rust-analyzer
             pkgs.clippy
-            # Native deps needed by Rust crates
-            pkgs.pkg-config
-            pkgs.openssl
-            pkgs.postgresql
-            pkgs.oniguruma   # for tokenizers "onig" feature
-          ];
+          ] ++ nativeDeps ++ buildDeps;
 
-          # Linker picks up openssl, libpq, libonig
-          PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig:${pkgs.postgresql.lib}/lib/pkgconfig:${pkgs.oniguruma}/lib/pkgconfig";
-          LD_LIBRARY_PATH = "${pkgs.openssl.out}/lib:${pkgs.postgresql.lib}/lib:${pkgs.oniguruma}/lib";
+          PKG_CONFIG_PATH  = "${pkgs.oniguruma}/lib/pkgconfig:${pkgs.openssl.dev}/lib/pkgconfig";
+          LD_LIBRARY_PATH  = "${pkgs.oniguruma}/lib:${pkgs.openssl}/lib";
 
           shellHook = ''
             echo "Feynman Chiron dev shell"
             echo "  Python (ingest): $(python3 --version)"
             echo "  Rust (agent):    $(rustc --version)"
             echo ""
-            echo "Build chiron-rs:"
-            echo "  cd chiron-rs && cargo build --release"
+            echo "Build:  cargo build --release   (in chiron-rs/)"
+            echo "Or:     nix build"
           '';
         };
       }
