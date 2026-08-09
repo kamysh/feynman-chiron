@@ -10,35 +10,49 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        # musl-based package set — all C libs compiled as static musl
+        # musl-based package set — all C libs compiled as static musl. On
+        # Linux this produces a fully static binary; on Darwin, pkgsStatic
+        # links everything reachable statically except Apple system
+        # frameworks (there is no static libc equivalent there).
         staticPkgs = pkgs.pkgsStatic;
 
         # ── Rust package (statically linked musl binary) ─────────────────────
-        chiron-rs = staticPkgs.rustPlatform.buildRustPackage {
+        #
+        # On Linux: musl via pkgsStatic → fully static binary. hf-hub's
+        # HTTP client links against OpenSSL; pkgsStatic provides the static
+        # libssl/libcrypto. On macOS: Security.framework is a system
+        # framework linked automatically, no extra inputs needed (same
+        # pattern as kamysh/mimir and kamysh/muninn's flakes).
+        #
+        # tokenizers pulls in `esaxx-rs` (C++, always — independent of any
+        # feature flag), so the binary links libstdc++. On x86_64 musl,
+        # libstdc++.a's eh_personality.o has R_X86_64_32S relocations that
+        # can't appear in a PIE, and pkgsStatic defaults to -static-pie — so
+        # disable PIE for that one target. darwin and aarch64-linux link
+        # fine without this (verified in muninn's flake.nix, same esaxx-rs
+        # dependency).
+        chiron-rs = staticPkgs.rustPlatform.buildRustPackage ({
           pname   = "chiron-rs";
           version = "0.1.0";
           src     = ./chiron-rs;
 
           cargoLock.lockFile = ./chiron-rs/Cargo.lock;
 
-          # pkg-config runs on the build host, not the musl target
-          nativeBuildInputs = [ pkgs.pkg-config ];
-
-          # C deps as static musl libraries
-          buildInputs = [
-            staticPkgs.oniguruma   # tokenizers "onig" feature
-            staticPkgs.openssl     # hf-hub → native-tls → openssl-sys
+          buildInputs = pkgs.lib.optionals (pkgs.lib.hasSuffix "linux" system) [
+            staticPkgs.openssl
           ];
-
-          PKG_CONFIG_PATH    = "${staticPkgs.oniguruma}/lib/pkgconfig:${staticPkgs.openssl.dev}/lib/pkgconfig";
+          nativeBuildInputs = pkgs.lib.optionals (pkgs.lib.hasSuffix "linux" system) [
+            pkgs.pkg-config
+          ];
+        } // pkgs.lib.optionalAttrs (pkgs.lib.hasSuffix "linux" system) {
+          PKG_CONFIG_PATH       = "${staticPkgs.openssl.dev}/lib/pkgconfig";
           PKG_CONFIG_ALL_STATIC = "1";
-          OPENSSL_STATIC      = "1";
-          OPENSSL_LIB_DIR     = "${staticPkgs.openssl.out}/lib";
-          OPENSSL_INCLUDE_DIR = "${staticPkgs.openssl.dev}/include";
-          # esaxx-rs (tokenizers dep, C++) isn't compiled with -fPIE; use
-          # plain -static instead of -static-pie to allow non-PIC relocations.
-          RUSTFLAGS           = "-C relocation-model=static";
-        };
+          OPENSSL_STATIC        = "1";
+          OPENSSL_LIB_DIR       = "${staticPkgs.openssl.out}/lib";
+          OPENSSL_INCLUDE_DIR   = "${staticPkgs.openssl.dev}/include";
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          RUSTFLAGS = "-C relocation-model=static";
+        });
 
         # ── Python env for textbook ingestion (chiron_storage.py) ────────────
         pythonEnv = pkgs.python3.withPackages (ps: with ps; [
@@ -65,12 +79,11 @@
             pkgs.rust-analyzer
             pkgs.clippy
             pkgs.pkg-config
-            pkgs.oniguruma
             pkgs.openssl
           ];
 
-          PKG_CONFIG_PATH = "${pkgs.oniguruma}/lib/pkgconfig:${pkgs.openssl.dev}/lib/pkgconfig";
-          LD_LIBRARY_PATH = "${pkgs.oniguruma}/lib:${pkgs.openssl}/lib";
+          PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+          LD_LIBRARY_PATH = "${pkgs.openssl}/lib";
 
           shellHook = ''
             echo "Feynman Chiron dev shell"

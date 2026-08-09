@@ -14,6 +14,8 @@ jobs:
             artifact: linux-amd64
           - runner: ubuntu-24.04-arm
             artifact: linux-arm64
+          - runner: macos-latest
+            artifact: darwin-arm64
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -50,6 +52,7 @@ jobs:
           files: |
             chiron-rs-linux-amd64/chiron-rs-linux-amd64
             chiron-rs-linux-arm64/chiron-rs-linux-arm64
+            chiron-rs-darwin-arm64/chiron-rs-darwin-arm64
 
       # Keep only THIS release's per-platform binaries as Actions artifacts.
       # The distributable binaries live on the GitHub Release (published above).
