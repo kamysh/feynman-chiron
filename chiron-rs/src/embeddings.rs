@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{split_id, HFClientSync};
 use tokenizers::Tokenizer;
 
 const MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
@@ -18,14 +18,15 @@ impl Embedder {
     pub fn new() -> Result<Self> {
         let device = Device::Cpu;
 
-        let api = Api::new().context("Failed to create HuggingFace Hub API")?;
-        let repo = api.repo(Repo::new(MODEL_ID.to_string(), RepoType::Model));
+        let client = HFClientSync::new().context("Failed to create HuggingFace Hub client")?;
+        let (owner, name) = split_id(MODEL_ID);
+        let repo = client.model(owner, name);
 
-        let config_path = repo.get("config.json")
+        let config_path = repo.download_file().filename("config.json").send()
             .context("Failed to download config.json")?;
-        let tokenizer_path = repo.get("tokenizer.json")
+        let tokenizer_path = repo.download_file().filename("tokenizer.json").send()
             .context("Failed to download tokenizer.json")?;
-        let weights_path = repo.get("model.safetensors")
+        let weights_path = repo.download_file().filename("model.safetensors").send()
             .context("Failed to download model.safetensors")?;
 
         let config: Config = serde_json::from_reader(
@@ -69,11 +70,11 @@ impl Embedder {
         let mask_3d = mask_f.unsqueeze(2)?.broadcast_as(output.shape())?; // [1, seq_len, 384]
         let sum   = (output * mask_3d)?.sum(1)?;                     // [1, 384]
         let count = mask_f.sum(1)?.unsqueeze(1)?;                    // [1, 1]
-        let mean  = (sum / count)?;                                  // [1, 384]
+        let mean  = sum.broadcast_div(&count)?;                      // [1, 384]
 
         // L2 normalise
         let norm       = mean.sqr()?.sum(1)?.sqrt()?.unsqueeze(1)?;  // [1, 1]
-        let normalised = (mean / norm)?.squeeze(0)?;                 // [384]
+        let normalised = mean.broadcast_div(&norm)?.squeeze(0)?;     // [384]
 
         let vec = normalised.to_vec1::<f32>()?;
         debug_assert_eq!(vec.len(), EMBEDDING_DIM);

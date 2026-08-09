@@ -17,8 +17,8 @@ pgvector         = { version = "0.4",  features = ["postgres"] }
 candle-core         = "0.9"
 candle-nn           = "0.9"
 candle-transformers = "0.9"
-hf-hub     = "0.3"
-tokenizers = { version = "0.19", features = ["onig"] }
+hf-hub     = { version = "1", features = ["blocking"] }
+tokenizers = "0.21"
 uuid       = { version = "1", features = ["v4"] }
 anyhow     = "1"
 
