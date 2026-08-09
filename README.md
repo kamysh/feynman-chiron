@@ -11,39 +11,117 @@ Learn using the Feynman Technique with AI assistance. Explain concepts, get Socr
 
 ## Installation
 
-### 1. Build the agent backend
+Feynman Chiron isn't on MELPA — install directly from the GitHub repo, then build
+the `chiron-rs` backend binary.
 
-```bash
-cd feynman-chiron
-nix build .#chiron-rs   # static musl binary at result/bin/chiron-rs
-```
+### 1. Get the Emacs package
 
-Or for local development (dynamic build):
+Pick whichever matches your setup:
 
-```bash
-nix develop
-cd chiron-rs && cargo build --release
-```
-
-### 2. Emacs Configuration
-
-Add to `~/.emacs.d/init.el`:
+**`use-package` + `:vc` (Emacs 30+, no extra package manager needed):**
 
 ```elisp
-(add-to-list 'load-path "/path/to/feynman-chiron")
-(require 'feynman-chiron)
-
-(setq feynman-chiron-anthropic-key (getenv "ANTHROPIC_API_KEY"))
-(setq feynman-chiron-openai-key (getenv "OPENAI_API_KEY"))
-(setq feynman-chiron-backend-program
-      "/path/to/feynman-chiron/chiron-rs/target/release/chiron-rs")
+(use-package feynman-chiron
+  :vc (:url "https://github.com/kamysh/feynman-chiron" :branch "main")
+  :custom
+  (feynman-chiron-database-url "postgresql://host/chiron"))
 ```
 
-`feynman-chiron-backend-program` may be left unset (`nil`) if `chiron-rs` is on `PATH`
-(e.g. installed via the nix flake) — it's then auto-detected, falling back to
-`chiron-rs/target/release/chiron-rs` inside the package directory.
+**`package-vc-install` (Emacs 29+):**
 
-### 3. Database Setup
+```elisp
+(package-vc-install "https://github.com/kamysh/feynman-chiron")
+(require 'feynman-chiron)
+```
+
+**straight.el:**
+
+```elisp
+(straight-use-package
+ '(feynman-chiron :type git :host github :repo "kamysh/feynman-chiron"))
+```
+
+**elpaca:**
+
+```elisp
+(use-package feynman-chiron
+  :elpaca (:host github :repo "kamysh/feynman-chiron"))
+```
+
+**Manual clone (or as a submodule of your `.emacs.d`):**
+
+```bash
+git clone https://github.com/kamysh/feynman-chiron.git ~/.emacs.d/site-lisp/feynman-chiron
+```
+
+```elisp
+(add-to-list 'load-path "~/.emacs.d/site-lisp/feynman-chiron")
+(require 'feynman-chiron)
+```
+
+### 2. Get the agent backend
+
+The Emacs package is only the frontend — it drives a separate `chiron-rs` binary
+as a subprocess.
+
+**Automatic (recommended):** just run `M-x feynman-chiron-start`. If `chiron-rs`
+isn't found on `PATH` or already installed, Emacs asks to install it, then does
+so itself — no shell commands needed:
+
+- If you installed via a git clone/submodule that includes the `chiron-rs/`
+  source tree and you have [Nix](https://nixos.org/) on `PATH`, it runs
+  `nix build .#chiron-rs` and copies the result in.
+- Otherwise it downloads the prebuilt binary for your platform from
+  [Releases](https://github.com/kamysh/feynman-chiron/releases).
+
+Either way the binary lands in `feynman-chiron-backend-install-dir` (default
+`~/.emacs.d/bin/`) and is auto-detected from then on. You can also trigger
+this directly: `M-x feynman-chiron-install-backend`.
+
+The binary has no use outside this package, so it's deliberately kept out of
+your shell `PATH` — this isn't a general-purpose CLI tool to install
+system-wide, it only exists as a subprocess the Emacs package talks to.
+
+**Manual, if you'd rather not let Emacs run `nix build`/download things:** drop
+the binary at exactly `feynman-chiron-backend-install-dir`'s default location
+(`~/.emacs.d/bin/chiron-rs`) and it's auto-detected — no `PATH` or
+`feynman-chiron-backend-program` setup needed:
+
+```bash
+mkdir -p ~/.emacs.d/bin
+
+# Prebuilt release binary (substitute chiron-rs-linux-arm64 /
+# chiron-rs-darwin-arm64 for other platforms):
+curl -fL -o ~/.emacs.d/bin/chiron-rs \
+  https://github.com/kamysh/feynman-chiron/releases/latest/download/chiron-rs-linux-amd64
+chmod +x ~/.emacs.d/bin/chiron-rs
+
+# Or build from source (requires Nix):
+cd feynman-chiron
+nix build .#chiron-rs   # static binary at result/bin/chiron-rs
+install -m 755 result/bin/chiron-rs ~/.emacs.d/bin/chiron-rs
+```
+
+For local development (dynamic build, faster iteration): `nix develop`, then
+`cd chiron-rs && cargo build --release` — picked up automatically from
+`chiron-rs/target/release/chiron-rs` next to the package source.
+
+### 3. Configure
+
+At minimum, set a database URL and (if the binary isn't on `PATH`) the backend
+program path:
+
+```elisp
+(setq feynman-chiron-database-url "postgresql://host/chiron")
+(setq feynman-chiron-backend-program "~/.local/bin/chiron-rs")  ; omit if on PATH
+```
+
+API keys: set `feynman-chiron-anthropic-key` / `feynman-chiron-openai-key`
+directly, or leave them `nil` to fall back to `auth-source` (e.g. `~/.authinfo.gpg`
+with `machine api.anthropic.com login apikey password sk-ant-...`). See
+[Configuration](#configuration) below for the full variable reference.
+
+### 4. Database Setup
 
 **On PostgreSQL server:**
 
@@ -68,7 +146,7 @@ CREATE SCHEMA learning;
 CREATE SCHEMA math;
 ```
 
-### 4. Ingest Textbooks (Optional)
+### 5. Ingest Textbooks (Optional)
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -77,6 +155,37 @@ python3 chiron_storage.py ingest \
   ~/textbooks/book.pdf \
   "book-name"
 ```
+
+## Configuration
+
+Global settings (`M-x customize-group RET feynman-chiron RET`, or `setq`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `feynman-chiron-default-provider` | `anthropic` | `openai` or `anthropic`, used when a buffer doesn't override it |
+| `feynman-chiron-openai-model` | `"gpt-4"` | Default OpenAI model name |
+| `feynman-chiron-anthropic-model` | `"claude-sonnet-4-6"` | Default Anthropic model name |
+| `feynman-chiron-openai-key` | `nil` | OpenAI API key: string, zero-arg function (e.g. `password-store-get`), or `nil` to fall back to `auth-source` (host `api.openai.com`) |
+| `feynman-chiron-anthropic-key` | `nil` | Anthropic API key: string, zero-arg function, or `nil` to fall back to `auth-source` (host `api.anthropic.com`) |
+| `feynman-chiron-backend-program` | `nil` | Path to the `chiron-rs` binary; `nil` auto-detects via `PATH`, then `chiron-rs/target/release/chiron-rs` next to the package, then `feynman-chiron-backend-install-dir`, then offers to install it |
+| `feynman-chiron-backend-install-dir` | `~/.emacs.d/bin/` | Where `feynman-chiron-install-backend` installs the binary it builds or downloads (deliberately outside your shell `PATH` — the binary has no standalone use) |
+| `feynman-chiron-endpoint-url` | `nil` | Base URL for an OpenAI-compatible endpoint (Groq, Mistral, Ollama, …) when provider is `openai`; defaults to `https://api.openai.com` |
+| `feynman-chiron-backend-buffer` | `" *feynman-backend*"` | Name of the buffer holding the backend process's stderr/stdout |
+
+Per-buffer settings, set via file-local variables (see the `algebra.org` example
+below) or `.dir-locals.el` — these have no global default and configure what a
+given learning session talks to:
+
+| Variable | Purpose |
+|---|---|
+| `feynman-chiron-database-url` | PostgreSQL connection string, e.g. `"postgresql://host/chiron"` |
+| `feynman-chiron-learning-schema` | Schema name for this session's progress/mastery tracking |
+| `feynman-chiron-textbook-sources` | Alist of `(name . schema)` or `(name . (database-url . schema))` for RAG retrieval — see the "Advanced" example below |
+| `feynman-chiron-provider` | Per-buffer override of `feynman-chiron-default-provider` |
+| `feynman-chiron-model` | Per-buffer override of the provider's default model |
+
+`feynman-chiron-database-url` is commonly set once, globally, via
+`setq-default` (see the direnv tip below) rather than repeated per file.
 
 ## Usage
 

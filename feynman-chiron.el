@@ -3,20 +3,26 @@
 ;; Copyright (C) 2025
 
 ;; Author: Valentyn
-;; Version: 1.0
+;; Version: 2.0.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: learning, education, ai
+;; URL: https://github.com/kamysh/feynman-chiron
 
 ;;; Commentary:
 
 ;; Feynman Chiron implements the Feynman Technique for active learning.
-;; 
+;;
 ;; You explain concepts in your own words, Chiron identifies gaps,
 ;; asks probing questions, and helps you refine until you truly understand.
 ;;
+;; This file is the Emacs frontend only.  It drives a separate `chiron-rs`
+;; binary (see chiron-rs/ in this repo, or a release download) as a
+;; subprocess for retrieval, LLM calls, and PostgreSQL-backed mastery
+;; tracking.  See README.md for installation and configuration.
+;;
 ;; Usage:
 ;;   M-x feynman-chiron-start
-;;   
+;;
 ;; In the buffer:
 ;;   - Type after the > prompt
 ;;   - C-c C-c to submit
@@ -26,7 +32,14 @@
 ;;; Code:
 
 (require 'json)
-(require 'url)
+
+(defconst feynman-chiron--package-dir
+  (file-name-directory
+   (or load-file-name buffer-file-name (locate-library "feynman-chiron")))
+  "Directory this package was loaded from.
+Captured once at load time: `load-file-name' is only bound while a
+file is actively being loaded, so it cannot be read reliably from
+inside a function body called later (e.g. from `M-x').")
 
 ;;; Customization
 
@@ -69,6 +82,49 @@ Set via file-local variables:
   # feynman-chiron-model: \"gpt-4-turbo\"
   # End:")
 
+;;; API keys
+
+(defcustom feynman-chiron-openai-key nil
+  "OpenAI API key: a string, or a zero-arg function returning one.
+A function is called fresh on every use, so it can wrap
+`password-store-get', a shell-out to a credential manager, etc.
+If nil, looked up lazily from `auth-source' (host \"api.openai.com\")."
+  :type '(choice (const :tag "Look up via auth-source" nil)
+                 (string :tag "API Key")
+                 (function :tag "Function returning the key"))
+  :group 'feynman-chiron)
+
+(defcustom feynman-chiron-anthropic-key nil
+  "Anthropic API key: a string, or a zero-arg function returning one.
+A function is called fresh on every use, so it can wrap
+`password-store-get', a shell-out to a credential manager, etc.
+If nil, looked up lazily from `auth-source' (host \"api.anthropic.com\")."
+  :type '(choice (const :tag "Look up via auth-source" nil)
+                 (string :tag "API Key")
+                 (function :tag "Function returning the key"))
+  :group 'feynman-chiron)
+
+(defun feynman-chiron--auth-source-key (host)
+  "Look up a secret for HOST via `auth-source'."
+  (require 'auth-source)
+  (let ((secret (plist-get (car (auth-source-search :host host :max 1)) :secret)))
+    (if (functionp secret) (funcall secret) secret)))
+
+(defun feynman-chiron--resolve-key (key host)
+  "Resolve KEY to a string: call it if a function, else use as-is.
+Falls back to an `auth-source' lookup on HOST when KEY is nil."
+  (cond ((functionp key) (funcall key))
+        (key key)
+        (t (feynman-chiron--auth-source-key host))))
+
+(defun feynman-chiron--openai-key ()
+  "Return the configured OpenAI API key, falling back to `auth-source'."
+  (feynman-chiron--resolve-key feynman-chiron-openai-key "api.openai.com"))
+
+(defun feynman-chiron--anthropic-key ()
+  "Return the configured Anthropic API key, falling back to `auth-source'."
+  (feynman-chiron--resolve-key feynman-chiron-anthropic-key "api.anthropic.com"))
+
 ;;; Internal variables
 
 (defvar feynman-chiron-buffer-name "*Feynman Chiron*"
@@ -96,15 +152,6 @@ Plist containing:
   (or feynman-chiron-provider
       feynman-chiron-default-provider))
 
-(defun feynman-chiron--api-key ()
-  "Get API key for the current provider."
-  (let* ((provider (feynman-chiron--get-provider))
-         (key (if (eq provider 'openai)
-                  (api-keys-get-openai)
-                (api-keys-get-anthropic))))
-    (or key
-        (error "No API key set for %s. Check ~/.authinfo.gpg" provider))))
-
 (defun feynman-chiron--model ()
   "Get model name for the current provider."
   (let ((provider (feynman-chiron--get-provider)))
@@ -112,117 +159,6 @@ Plist containing:
         (if (eq provider 'openai)
             feynman-chiron-openai-model
           feynman-chiron-anthropic-model))))
-
-(defun feynman-chiron--call-openai (messages)
-  "Call OpenAI API with MESSAGES."
-  (let* ((url-request-method "POST")
-         (url-request-extra-headers
-          `(("Content-Type" . "application/json")
-            ("Authorization" . ,(concat "Bearer " (feynman-chiron--api-key)))))
-         (url-request-data
-          (encode-coding-string
-           (json-encode
-            `((model . ,(feynman-chiron--model))
-              (messages . ,messages)
-              (temperature . 0.3)))
-           'utf-8))
-         (buffer (url-retrieve-synchronously
-                  "https://api.openai.com/v1/chat/completions"
-                  nil nil 30)))
-    (if (not buffer)
-        (error "OpenAI API request failed")
-      (with-current-buffer buffer
-        (goto-char (point-min))
-        (re-search-forward "^$")
-        (let* ((json-object-type 'alist)
-               (json-array-type 'list)
-               (response (json-read)))
-          (kill-buffer)
-          ;; Extract message content from OpenAI response
-          (let* ((choices (alist-get 'choices response))
-                 (first-choice (car choices))
-                 (message (alist-get 'message first-choice))
-                 (content (alist-get 'content message)))
-            content))))))
-
-(defun feynman-chiron--call-anthropic (messages)
-  "Call Anthropic API with MESSAGES.
-Converts OpenAI-style messages to Anthropic format."
-  (let* ((system-msg nil)
-         (converted-messages
-          (mapcar
-           (lambda (msg)
-             (let ((role (alist-get 'role msg))
-                   (content (alist-get 'content msg)))
-               (cond
-                ;; Extract system message separately
-                ((string= role "system")
-                 (setq system-msg content)
-                 nil)
-                ;; Convert assistant to assistant
-                ((string= role "assistant")
-                 `((role . "assistant")
-                   (content . ,content)))
-                ;; Convert user to user
-                ((string= role "user")
-                 `((role . "user")
-                   (content . ,content)))
-                (t
-                 `((role . "user")
-                   (content . ,content))))))
-           messages))
-         ;; Remove nil (system messages)
-         (filtered-messages (delq nil converted-messages))
-         (url-request-method "POST")
-         (url-request-extra-headers
-          `(("Content-Type" . "application/json")
-            ("x-api-key" . ,(feynman-chiron--api-key))
-            ("anthropic-version" . "2023-06-01")))
-         (request-body
-          `((model . ,(feynman-chiron--model))
-            (max_tokens . 4096)
-            (temperature . 0.3)
-            (messages . ,filtered-messages)))
-         ;; Add system message if present
-         (request-body-with-system
-          (if system-msg
-              (append request-body `((system . ,system-msg)))
-            request-body))
-         (url-request-data
-          (encode-coding-string
-           (json-encode request-body-with-system)
-           'utf-8))
-         (buffer (url-retrieve-synchronously
-                  "https://api.anthropic.com/v1/messages"
-                  nil nil 30)))
-    (if (not buffer)
-        (error "Anthropic API request failed")
-      (with-current-buffer buffer
-        (goto-char (point-min))
-        (re-search-forward "^$")
-        (let* ((json-object-type 'alist)
-               (json-array-type 'list)
-               (response (json-read)))
-          (kill-buffer)
-          ;; Extract content from Anthropic response
-          (let* ((content-blocks (alist-get 'content response))
-                 (first-block (car content-blocks))
-                 (text (alist-get 'text first-block)))
-            text))))))
-
-(defun feynman-chiron--call-api (messages)
-  "Call configured API provider with MESSAGES.
-MESSAGES should be in OpenAI format (will be converted if needed):
-  ((role . \"system\") (content . \"...\"))
-  ((role . \"user\") (content . \"...\"))
-  ((role . \"assistant\") (content . \"...\"))"
-  (condition-case err
-      (if (eq (feynman-chiron--get-provider) 'openai)
-          (feynman-chiron--call-openai messages)
-        (feynman-chiron--call-anthropic messages))
-    (error
-     (message "API call failed: %s" err)
-     (signal (car err) (cdr err)))))
 
 ;;; Rust Backend Integration
 
@@ -287,25 +223,131 @@ Set via file-local variables:
 The agent queries all specified sources.")
 
 (defcustom feynman-chiron-backend-buffer " *feynman-backend*"
-  "Buffer name for backend process output."
+  "Buffer name for the backend process's stdout.
+chiron-rs's protocol is one newline-terminated JSON object per line
+on stdout; this buffer must contain ONLY that (see
+`feynman-chiron-backend-stderr-buffer' for its diagnostic output)."
   :type 'string
   :group 'feynman-chiron)
 
+(defcustom feynman-chiron-backend-stderr-buffer " *feynman-backend-stderr*"
+  "Buffer name for the backend process's stderr (progress/diagnostics).
+Kept separate from `feynman-chiron-backend-buffer' — chiron-rs's
+stdout is a line-based JSON protocol, and `make-process' merges
+stderr into the same buffer as stdout unless given a distinct
+destination, which would otherwise corrupt the JSON stream with
+interleaved diagnostic text."
+  :type 'string
+  :group 'feynman-chiron)
+
+(defconst feynman-chiron--github-repo "kamysh/feynman-chiron"
+  "GitHub \"owner/repo\" slug the chiron-rs binary is released from.")
+
+(defcustom feynman-chiron-backend-install-dir
+  (expand-file-name "bin/" user-emacs-directory)
+  "Directory `feynman-chiron-install-backend' installs chiron-rs into.
+The chiron-rs binary has no use outside this package, so it's kept
+package-private here rather than added to your shell PATH;
+`feynman-chiron--find-backend' auto-detects it from this directory
+without any PATH or `feynman-chiron-backend-program' setup needed."
+  :type 'directory
+  :group 'feynman-chiron)
+
+(defun feynman-chiron--release-asset-name ()
+  "Return the chiron-rs release asset name for the current platform,
+or nil if the platform isn't one we publish binaries for."
+  (let ((arch (cond ((string-match-p "aarch64\\|arm64" system-configuration) "arm64")
+                     ((string-match-p "x86_64" system-configuration) "amd64")
+                     (t nil))))
+    (when arch
+      (pcase system-type
+        ('gnu/linux (format "chiron-rs-linux-%s" arch))
+        ('darwin    (format "chiron-rs-darwin-%s" arch))
+        (_ nil)))))
+
+(defun feynman-chiron--download-backend ()
+  "Download the prebuilt chiron-rs binary for this platform.
+Returns the installed path, or signals an error."
+  (let ((asset (feynman-chiron--release-asset-name)))
+    (unless asset
+      (error "No prebuilt chiron-rs binary for this platform (%s/%s)"
+             system-type system-configuration))
+    (require 'url)
+    (make-directory feynman-chiron-backend-install-dir t)
+    (let ((dest (expand-file-name "chiron-rs" feynman-chiron-backend-install-dir))
+          (url (format "https://github.com/%s/releases/latest/download/%s"
+                       feynman-chiron--github-repo asset)))
+      (message "Downloading %s..." url)
+      (url-copy-file url dest t)
+      (set-file-modes dest #o755)
+      (message "Installed chiron-rs to %s" dest)
+      dest)))
+
+(defun feynman-chiron--has-source-tree-p ()
+  "Non-nil if a chiron-rs/ Rust source tree sits next to this package."
+  (file-exists-p (expand-file-name "chiron-rs/Cargo.toml" feynman-chiron--package-dir)))
+
+(defun feynman-chiron--build-backend ()
+  "Build chiron-rs from source via Nix.
+Only usable when this package was loaded from a checkout that also
+has the chiron-rs/ Rust source tree (i.e. the git repo, not a release
+tarball of just the .el file). Returns the installed path, or signals
+an error."
+  (let ((default-directory feynman-chiron--package-dir))
+    (unless (feynman-chiron--has-source-tree-p)
+      (error "No chiron-rs source tree found next to feynman-chiron.el"))
+    (unless (executable-find "nix")
+      (error "Nix not found on PATH; cannot build chiron-rs from source"))
+    (message "Building chiron-rs via Nix (this can take several minutes)...")
+    (with-temp-buffer
+      (let ((status (call-process "nix" nil t nil "build" ".#chiron-rs")))
+        (unless (zerop status)
+          (error "nix build .#chiron-rs failed:\n%s" (buffer-string)))))
+    (make-directory feynman-chiron-backend-install-dir t)
+    (let ((built (expand-file-name "result/bin/chiron-rs" feynman-chiron--package-dir))
+          (dest (expand-file-name "chiron-rs" feynman-chiron-backend-install-dir)))
+      (unless (file-exists-p built)
+        (error "nix build succeeded but %s is missing" built))
+      (copy-file built dest t)
+      (set-file-modes dest #o755)
+      (message "Installed chiron-rs to %s" dest)
+      dest)))
+
+;;;###autoload
+(defun feynman-chiron-install-backend ()
+  "Install the chiron-rs backend binary.
+Builds from source via Nix when a source checkout is available,
+otherwise downloads the prebuilt release binary for this platform.
+Returns the installed path."
+  (interactive)
+  (if (and (feynman-chiron--has-source-tree-p) (executable-find "nix"))
+      (feynman-chiron--build-backend)
+    (feynman-chiron--download-backend)))
+
 (defun feynman-chiron--find-backend ()
-  "Find the chiron-rs binary."
+  "Find the chiron-rs binary, installing it if necessary.
+Looks on PATH, next to the package source, in
+`feynman-chiron-backend-install-dir', then offers to install it via
+`feynman-chiron-install-backend'."
   (or feynman-chiron-backend-program
       ;; Look in PATH first
       (executable-find "chiron-rs")
-      ;; Then relative to the package directory
+      ;; Then relative to the package directory / a prior auto-install
       (let ((candidates (list
-                         (when load-file-name
-                           (expand-file-name
-                            "chiron-rs/target/release/chiron-rs"
-                            (file-name-directory load-file-name)))
                          (expand-file-name
                           "chiron-rs/target/release/chiron-rs"
-                          user-emacs-directory))))
-        (seq-find #'file-exists-p candidates))))
+                          feynman-chiron--package-dir)
+                         (expand-file-name
+                          "chiron-rs" feynman-chiron-backend-install-dir))))
+        (seq-find #'file-exists-p candidates))
+      ;; Not found anywhere: offer to install it now.
+      (when (and (not noninteractive)
+                 (y-or-n-p "chiron-rs binary not found. Install it now? "))
+        (condition-case err
+            (feynman-chiron-install-backend)
+          (error
+           (message "Automatic install failed: %s" (error-message-string err))
+           nil)))))
 
 (defun feynman-chiron--build-db-url (schema)
   "Build database URL from base URL and SCHEMA name.
@@ -341,7 +383,7 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
     (nreverse normalized)))
 
 (defun feynman-chiron--start-backend ()
-  "Start the LangGraph Chiron agent backend."
+  "Start the chiron-rs agent backend."
   ;; Skip if backend already running
   (unless (and feynman-chiron-backend-process
                (process-live-p feynman-chiron-backend-process))
@@ -354,18 +396,19 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
 
     (let ((binary (feynman-chiron--find-backend)))
     (unless binary
-      (error "Cannot find chiron-rs binary. Build it with: cd chiron-rs && cargo build --release"))
+      (error "Cannot find chiron-rs binary. Run M-x feynman-chiron-install-backend"))
 
     (message "Starting Chiron agent: %s" binary)
 
     ;; Normalize textbook sources for backend
     (let* ((normalized-sources (feynman-chiron--normalize-textbook-sources))
-           ;; Get API keys from centralized api-keys.el (lazy-loaded)
-           (openai-key (api-keys-get-openai))
-           (anthropic-key (api-keys-get-anthropic))
            (provider (feynman-chiron--get-provider))
-           ;; For openai-compat, use the openai key; for anthropic, the anthropic key
-           (chiron-api-key (if (eq provider 'anthropic) anthropic-key openai-key))
+           ;; Resolve only the active provider's key: resolving the other
+           ;; one too (via auth-source) can trigger an unwanted/unrelated
+           ;; secret lookup (e.g. a GPG prompt) even when it's unused.
+           (chiron-api-key (if (eq provider 'anthropic)
+                                (feynman-chiron--anthropic-key)
+                              (feynman-chiron--openai-key)))
            (process-environment
             (append
              (list
@@ -377,10 +420,6 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
                       (json-encode normalized-sources)))
              (when chiron-api-key
                (list (format "CHIRON_API_KEY=%s" chiron-api-key)))
-             (when openai-key
-               (list (format "OPENAI_API_KEY=%s" openai-key)))
-             (when anthropic-key
-               (list (format "ANTHROPIC_API_KEY=%s" anthropic-key)))
              (when feynman-chiron-endpoint-url
                (list (format "CHIRON_ENDPOINT_URL=%s" feynman-chiron-endpoint-url)))
              process-environment)))
@@ -389,6 +428,7 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
             (make-process
              :name "chiron-agent"
              :buffer feynman-chiron-backend-buffer
+             :stderr feynman-chiron-backend-stderr-buffer
              :command (list binary)
              :connection-type 'pipe
              :sentinel #'feynman-chiron--backend-sentinel))
@@ -442,9 +482,13 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
     (process-send-string feynman-chiron-backend-process
                         (concat json-string "\n"))
     
-    ;; Wait for response
+    ;; Wait for a full response line. chiron-rs writes one newline-terminated
+    ;; JSON object per response; waiting on buffer-size alone races against
+    ;; partial pipe reads and can hand json-read a truncated object.
     (with-timeout (10 nil)
-      (while (= 0 (buffer-size (get-buffer feynman-chiron-backend-buffer)))
+      (while (not (with-current-buffer feynman-chiron-backend-buffer
+                    (goto-char (point-min))
+                    (search-forward "\n" nil t)))
         (sleep-for 0.05)))
     
     ;; Parse response
@@ -468,10 +512,15 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
          (error nil))))
 
 (defun feynman-chiron--process-with-agent (concept explanation)
-  "Process explanation through the LangGraph Chiron agent."
-  (let ((textbook-sources (or feynman-chiron-textbook-sources '()))
+  "Process explanation through the chiron-rs agent."
+  ;; chiron-rs expects textbook_sources as a JSON array of source NAMES
+  ;; (Vec<String>), not the raw (name . spec) alist. Encode as a vector,
+  ;; not a list: json-encode can't distinguish an empty list from nil/false
+  ;; and would emit `null' instead of `[]', which chiron-rs rejects
+  ;; ("invalid type: null, expected a sequence").
+  (let ((textbook-sources (vconcat (mapcar #'car feynman-chiron-textbook-sources)))
         (thread-id (or (buffer-file-name) "default")))
-    
+
     (condition-case err
         (let ((response (feynman-chiron--call-backend
                         `((command . "process")
@@ -480,7 +529,10 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
                           (textbook_sources . ,textbook-sources)
                           (thread_id . ,thread-id)))))
           (if (alist-get 'success response)
-              (alist-get 'response response)
+              (or (alist-get 'response response)
+                  (progn
+                    (message "Agent reported success but sent no response text: %S" response)
+                    "(No response text from agent.)"))
             (progn
               (message "Agent processing failed: %s" (alist-get 'error response))
               "Error processing your explanation. Please try again.")))
@@ -687,23 +739,39 @@ Based on org-mode for structured writing.
 
 ;;;###autoload
 (defun feynman-chiron-start ()
-  "Start Feynman Chiron learning session."
+  "Start Feynman Chiron learning session.
+Reads per-session configuration (`feynman-chiron-database-url' and
+friends, all buffer-local) from the CALLING buffer — typically an
+org file with these set via file-local variables or `.dir-locals.el'
+— and carries it into the single shared `*Feynman Chiron*' session
+buffer, since that buffer is otherwise unrelated to whichever file
+you invoked this from and would see only unset defaults."
   (interactive)
-  
-  ;; Start backend if database and learning schema configured
-  (when (and feynman-chiron-database-url feynman-chiron-learning-schema)
-    (condition-case err
-        (progn
-          (feynman-chiron--start-backend)
-          (message "Agent started"))
-      (error
-       (message "Backend unavailable: %s" err))))
-  
-  ;; Create or switch to buffer
-  (let ((buffer (get-buffer-create feynman-chiron-buffer-name)))
-    (with-current-buffer buffer
-      (feynman-chiron-mode)
-      
+  (let ((database-url feynman-chiron-database-url)
+        (learning-schema feynman-chiron-learning-schema)
+        (textbook-sources feynman-chiron-textbook-sources)
+        (provider feynman-chiron-provider)
+        (model feynman-chiron-model))
+
+    ;; Create or switch to buffer
+    (let ((buffer (get-buffer-create feynman-chiron-buffer-name)))
+      (with-current-buffer buffer
+        (feynman-chiron-mode)
+        (setq-local feynman-chiron-database-url database-url)
+        (setq-local feynman-chiron-learning-schema learning-schema)
+        (setq-local feynman-chiron-textbook-sources textbook-sources)
+        (setq-local feynman-chiron-provider provider)
+        (setq-local feynman-chiron-model model)
+
+        ;; Start backend if database and learning schema configured
+        (when (and feynman-chiron-database-url feynman-chiron-learning-schema)
+          (condition-case err
+              (progn
+                (feynman-chiron--start-backend)
+                (message "Agent started"))
+            (error
+             (message "Backend unavailable: %s" err))))
+
       (let ((inhibit-read-only t))
         (erase-buffer)
         
@@ -771,9 +839,9 @@ Commands:
         (feynman-chiron--insert-prompt))
       
       (feynman-chiron--init-state))
-    
+
     (switch-to-buffer buffer)
-    (goto-char (point-max))))
+    (goto-char (point-max)))))
 
 (provide 'feynman-chiron)
 
