@@ -427,7 +427,7 @@ own default. It only takes effect on SCHEMA's first ingest — see
          (read-string "Schema: ")
          nil
          (read-string "Embedding model (empty for default): "
-                      feynman-chiron-embedding-model)))
+                      nil nil feynman-chiron-embedding-model)))
   (let ((db-url (feynman-chiron--require-database-url database-url))
         (model (or (and model (not (string-empty-p model)) model)
                    feynman-chiron-embedding-model)))
@@ -845,6 +845,7 @@ you invoked this from and would see only unset defaults."
   (let ((database-url feynman-chiron-database-url)
         (learning-schema feynman-chiron-learning-schema)
         (textbook-sources feynman-chiron-textbook-sources)
+        (embedding-model feynman-chiron-embedding-model)
         (provider feynman-chiron-provider)
         (model feynman-chiron-model))
 
@@ -855,6 +856,7 @@ you invoked this from and would see only unset defaults."
         (setq-local feynman-chiron-database-url database-url)
         (setq-local feynman-chiron-learning-schema learning-schema)
         (setq-local feynman-chiron-textbook-sources textbook-sources)
+        (setq-local feynman-chiron-embedding-model embedding-model)
         (setq-local feynman-chiron-provider provider)
         (setq-local feynman-chiron-model model)
 

@@ -19,8 +19,9 @@ pub struct Embedder {
 
 impl Embedder {
     /// Load MODEL_ID (any BERT-family sentence-embedding model on Hugging
-    /// Face Hub compatible with `candle_transformers::models::bert`) from
-    /// the local `hf-hub` cache, downloading it first if not yet cached.
+    /// Face Hub compatible with `candle_transformers::models::bert`) —
+    /// e.g. `DEFAULT_MODEL_ID` — from the local `hf-hub` cache, downloading
+    /// it first if not yet cached.
     pub fn new(model_id: &str) -> Result<Self> {
         let device = Device::Cpu;
 
@@ -85,15 +86,15 @@ impl Embedder {
         let output = self.model.forward(&token_ids, &token_type_ids, Some(&attention_mask))?;
 
         // Mean pooling weighted by attention mask
-        let mask_f = attention_mask.to_dtype(DType::F32)?;           // [1, seq_len]
-        let mask_3d = mask_f.unsqueeze(2)?.broadcast_as(output.shape())?; // [1, seq_len, 384]
-        let sum   = (output * mask_3d)?.sum(1)?;                     // [1, 384]
-        let count = mask_f.sum(1)?.unsqueeze(1)?;                    // [1, 1]
-        let mean  = sum.broadcast_div(&count)?;                      // [1, 384]
+        let mask_f = attention_mask.to_dtype(DType::F32)?;                // [1, seq_len]
+        let mask_3d = mask_f.unsqueeze(2)?.broadcast_as(output.shape())?; // [1, seq_len, hidden_size]
+        let sum   = (output * mask_3d)?.sum(1)?;                          // [1, hidden_size]
+        let count = mask_f.sum(1)?.unsqueeze(1)?;                         // [1, 1]
+        let mean  = sum.broadcast_div(&count)?;                           // [1, hidden_size]
 
         // L2 normalise
         let norm       = mean.sqr()?.sum(1)?.sqrt()?.unsqueeze(1)?;  // [1, 1]
-        let normalised = mean.broadcast_div(&norm)?.squeeze(0)?;     // [384]
+        let normalised = mean.broadcast_div(&norm)?.squeeze(0)?;     // [hidden_size]
 
         let vec = normalised.to_vec1::<f32>()?;
         debug_assert_eq!(vec.len(), self.dim);

@@ -142,34 +142,59 @@ impl Storage {
             .await
             .context("embedding_config table")?;
 
-        let existing = self.client
-            .query("SELECT model, dim FROM embedding_config", &[])
+        let existing = self.get_embedding_config().await?;
+
+        // An empty embedding_config does NOT necessarily mean "fresh schema"
+        // — a textbook_chunks table from before this feature existed (e.g.
+        // the old chiron_storage.py ingester, or any external tool) has no
+        // embedding_config row either. Trusting the requested model in that
+        // case would silently mislabel whatever's already in there. Refuse
+        // to guess.
+        if existing.is_none() {
+            let has_legacy_chunks: bool = self.client
+                .query_one("SELECT to_regclass('textbook_chunks') IS NOT NULL", &[])
+                .await
+                .context("checking for pre-existing textbook_chunks")?
+                .get(0);
+            if has_legacy_chunks {
+                anyhow::bail!(
+                    "textbook_chunks already exists in this schema with no embedding_config \
+                     (likely ingested before this feature existed, or by another tool). \
+                     Refusing to assume it matches model '{}' ({}-dim) — check the existing \
+                     embedding column's actual vector dimension and, if it matches, manually \
+                     insert the correct row into embedding_config before ingesting further.",
+                    model, dim
+                );
+            }
+        }
+
+        // INSERT ... ON CONFLICT DO NOTHING + re-SELECT, not a plain
+        // check-then-insert: two concurrent first-time ingests into the
+        // same fresh schema could otherwise both observe an empty table
+        // and both attempt to insert the singleton row.
+        self.client
+            .execute(
+                "INSERT INTO embedding_config (singleton, model, dim) VALUES (TRUE, $1, $2)
+                 ON CONFLICT (singleton) DO NOTHING",
+                &[&model, &dim],
+            )
+            .await
+            .context("embedding_config insert")?;
+
+        let row = self.client
+            .query_one("SELECT model, dim FROM embedding_config", &[])
             .await
             .context("reading embedding_config")?;
-
-        match existing.first() {
-            None => {
-                self.client
-                    .execute(
-                        "INSERT INTO embedding_config (singleton, model, dim) VALUES (TRUE, $1, $2)",
-                        &[&model, &dim],
-                    )
-                    .await
-                    .context("embedding_config insert")?;
-            }
-            Some(row) => {
-                let existing_model: String = row.get("model");
-                let existing_dim: i32 = row.get("dim");
-                if existing_model != model || existing_dim != dim {
-                    anyhow::bail!(
-                        "this schema was already ingested with embedding model '{}' ({}-dim); \
-                         requested model '{}' ({}-dim) does not match. Switching a project's \
-                         embedding model in place is not supported — ingest into a different \
-                         schema instead.",
-                        existing_model, existing_dim, model, dim
-                    );
-                }
-            }
+        let existing_model: String = row.get("model");
+        let existing_dim: i32 = row.get("dim");
+        if existing_model != model || existing_dim != dim {
+            anyhow::bail!(
+                "this schema was already ingested with embedding model '{}' ({}-dim); \
+                 requested model '{}' ({}-dim) does not match. Switching a project's \
+                 embedding model in place is not supported — ingest into a different \
+                 schema instead.",
+                existing_model, existing_dim, model, dim
+            );
         }
 
         self.client

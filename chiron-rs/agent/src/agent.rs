@@ -1,17 +1,15 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::Result;
 use reqwest::Client;
 
-use chiron_core::{Embedder, Storage};
+use chiron_core::Storage;
 
 use crate::{
     llm::chat,
     types::{ChironState, Gap, Provider, Stage},
+    TextbookSource,
 };
-
-type TextbookSource = (Storage, Arc<Embedder>);
 
 pub struct ProcessResult {
     pub response: String,
@@ -84,18 +82,28 @@ async fn retrieve(
     }
 
     let mut contexts = Vec::new();
+    // Different textbook sources can be configured with different embedding
+    // models (feynman-chiron-ingest-textbook's per-project --model), so the
+    // query must be re-embedded in each source's own vector space — but
+    // sources sharing a model share the same Arc<Embedder> (build_textbook_pools),
+    // so cache by model_id to avoid repeating an identical forward pass for
+    // each of them on every learner turn.
+    let mut embeddings_by_model: HashMap<&str, Vec<f32>> = HashMap::new();
     for source_name in &state.textbook_sources {
         let Some((storage, embedder)) = pools.get(source_name) else {
             eprintln!("No connection to textbook '{}'", source_name);
             continue;
         };
-        // Embedded per-source, not once globally: different textbook
-        // sources can be configured with different embedding models
-        // (feynman-chiron-ingest-textbook's per-project --model), so the
-        // query must be re-embedded in each source's own vector space.
-        let query_embedding = match embedder.embed(&state.concept) {
-            Ok(v)  => v,
-            Err(e) => { eprintln!("Embedding failed for '{}': {}", source_name, e); continue; }
+        let query_embedding = if let Some(v) = embeddings_by_model.get(embedder.model_id()) {
+            v.clone()
+        } else {
+            match embedder.embed(&state.concept) {
+                Ok(v) => {
+                    embeddings_by_model.insert(embedder.model_id(), v.clone());
+                    v
+                }
+                Err(e) => { eprintln!("Embedding failed for '{}': {}", source_name, e); continue; }
+            }
         };
         match storage.search_textbook(query_embedding, &[source_name.clone()], 2).await {
             Ok(chunks) => {

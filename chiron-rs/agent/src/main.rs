@@ -17,7 +17,7 @@ use chiron_core::{url::with_schema, Embedder, Storage};
 /// (`Storage::get_embedding_config`) — never assumed. Arc'd because
 /// multiple sources commonly share one model and shouldn't each load
 /// their own copy of it.
-type TextbookSource = (Storage, Arc<Embedder>);
+pub(crate) type TextbookSource = (Storage, Arc<Embedder>);
 
 use crate::{
     agent::process_explanation,
@@ -212,8 +212,8 @@ async fn build_textbook_pools(
             Err(e) => { eprintln!("Failed to connect to textbook '{}': {}", name, e); continue; }
         };
 
-        let model = match storage.get_embedding_config().await {
-            Ok(Some((model, _dim))) => model,
+        let (model, dim) = match storage.get_embedding_config().await {
+            Ok(Some(cfg)) => cfg,
             Ok(None) => {
                 eprintln!(
                     "Textbook '{}' (schema '{}') has no ingested content yet — skipping",
@@ -243,6 +243,15 @@ async fn build_textbook_pools(
                 }
             }
         };
+
+        if embedder.dim() as i32 != dim {
+            eprintln!(
+                "Textbook '{}' (schema '{}'): embedding_config says model '{}' is {}-dim, \
+                 but it actually reports {}-dim now — skipping to avoid a dimension mismatch",
+                name, schema, model, dim, embedder.dim()
+            );
+            continue;
+        }
 
         pools.insert(name.clone(), (storage, embedder));
     }

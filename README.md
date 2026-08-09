@@ -151,12 +151,13 @@ CREATE SCHEMA math;
 
 ### 5. Ingest Textbooks (Optional)
 
-`M-x feynman-chiron-ingest-textbook` (prompts for PDF path, textbook name, schema).
+`M-x feynman-chiron-ingest-textbook` (prompts for PDF path, textbook name, schema,
+and embedding model).
 
-No API key needed — embeddings are generated locally (same MiniLM model
-`chiron-rs` uses at query time). See [Embedding model](#embedding-model) below:
-the *first* run of either binary needs network access to fetch the model, after
-which ingestion needs only the database connection.
+No API key needed — embeddings are generated locally. See
+[Embedding model](#embedding-model) below: the *first* run of either binary
+needs network access to fetch the model, after which ingestion needs only
+the database connection.
 
 ## Embedding model
 
@@ -284,7 +285,8 @@ Everything is Rust — no Python anywhere in this package.
   agent loop — invoked only as a subprocess of the `M-x feynman-chiron-create-schema`
   / `-ingest-textbook` / `-search-textbook` Emacs commands, not run by hand.
 - **chiron-rs/core/** (library `chiron-core`): shared code between the two binaries
-  — the MiniLM embedder (`candle`) and PostgreSQL/pgvector storage layer.
+  — the configurable-model embedder (`candle`, see [Embedding model](#embedding-model))
+  and PostgreSQL/pgvector storage layer.
 - Per-buffer backend: each org file gets its own `chiron-rs` process
 - Per-file configuration: databases specified in file-local variables
 

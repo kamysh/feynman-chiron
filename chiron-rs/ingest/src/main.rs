@@ -120,13 +120,30 @@ async fn cmd_ingest(args: &[String]) -> Result<()> {
     }
     println!("✓ Created {} chunks", chunks.len());
 
-    println!("Loading embedding model '{}'…", a.model);
-    let embedder = Embedder::new(a.model).context("Failed to load embedding model")?;
-
     let db_url = with_schema(a.db_url, a.schema);
     println!("Connecting to database (schema '{}')...", a.schema);
     let storage = Storage::connect(&db_url).await
         .context("Failed to connect to database")?;
+
+    // Fail fast on an obvious model-name mismatch before paying for the
+    // (potentially network-downloading) model load below — the full
+    // model+dim check still happens in ensure_textbook_schema, this is
+    // just an early exit for the common case.
+    if let Some((existing_model, _)) = storage.get_embedding_config().await
+        .context("Failed to read embedding config")?
+    {
+        if existing_model != a.model {
+            bail!(
+                "schema '{}' was already ingested with embedding model '{}'; requested model \
+                 '{}' does not match. Switching a project's embedding model in place is not \
+                 supported — ingest into a different schema instead.",
+                a.schema, existing_model, a.model
+            );
+        }
+    }
+
+    println!("Loading embedding model '{}'…", a.model);
+    let embedder = Embedder::new(a.model).context("Failed to load embedding model")?;
     storage.ensure_textbook_schema(embedder.model_id(), embedder.dim() as i32).await
         .context("Failed to set up embedding schema")?;
 
@@ -215,7 +232,7 @@ async fn cmd_search(args: &[String]) -> Result<()> {
     let storage = Storage::connect(&db_url).await
         .context("Failed to connect to database")?;
 
-    let (model, _dim) = storage.get_embedding_config().await
+    let (model, dim) = storage.get_embedding_config().await
         .context("Failed to read embedding config")?
         .with_context(|| format!(
             "schema '{}' has no ingested textbooks yet — run `feynman-chiron-ingest-textbook` first",
@@ -223,6 +240,14 @@ async fn cmd_search(args: &[String]) -> Result<()> {
         ))?;
     println!("Loading embedding model '{}'…", model);
     let embedder = Embedder::new(&model).context("Failed to load embedding model")?;
+    if embedder.dim() as i32 != dim {
+        bail!(
+            "embedding_config says schema '{}' uses model '{}' at {}-dim, but that model \
+             actually reports {}-dim now — its Hugging Face Hub config may have changed. \
+             Refusing to search with a possibly-mismatched embedder.",
+            a.schema, model, dim, embedder.dim()
+        );
+    }
     let query_embedding = embedder.embed(a.query)?;
 
     let results = storage
