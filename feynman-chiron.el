@@ -268,12 +268,19 @@ interleaved diagnostic text."
 Both are built from the same chiron-rs/ Nix flake output.")
 
 (defcustom feynman-chiron-backend-install-dir
-  (expand-file-name "bin/" user-emacs-directory)
+  (expand-file-name "bin/" feynman-chiron--package-dir)
   "Directory `feynman-chiron-install-backend' installs binaries into.
 These binaries have no use outside this package, so they're kept
 package-private here rather than added to your shell PATH;
 `feynman-chiron--find-binary' auto-detects them from this directory
-without any PATH or `feynman-chiron-backend-program' setup needed."
+without any PATH or `feynman-chiron-backend-program' setup needed.
+
+Defaults inside the package's own checkout directory rather than
+somewhere shared like `user-emacs-directory' — that way the binaries
+need no separate `.gitignore' entry (a `package-vc-install' checkout's
+directory is already excluded wholesale by any sane dotfiles setup)
+and are automatically cleaned up if the checkout itself is ever
+deleted and recloned, rather than becoming orphaned files elsewhere."
   :type 'directory
   :group 'feynman-chiron)
 

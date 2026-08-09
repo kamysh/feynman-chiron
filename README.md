@@ -82,7 +82,10 @@ subprocesses: `chiron-rs` (the agent) and `chiron-ingest` (textbook ingestion).
 loads (once Emacs is idle), it downloads the prebuilt release binary for your
 platform from [Releases](https://github.com/kamysh/feynman-chiron/releases)
 for anything missing, into `feynman-chiron-backend-install-dir` (default
-`~/.emacs.d/bin/`), with no prompt. The same thing happens if a binary there
+`bin/` inside this package's own checkout, e.g.
+`~/.emacs.d/elpa/feynman-chiron/bin/` — no separate `.gitignore` entry
+needed, and it's cleaned up automatically if the checkout is ever deleted
+and recloned), with no prompt. The same thing happens if a binary there
 is ever found to be a different version than the currently-loaded package —
 you never need to remember to update it yourself. `M-x feynman-chiron-install-backend`
 exists if you want to force a (re)install right now instead of waiting for
@@ -94,16 +97,18 @@ system-wide, they only exist as subprocesses the Emacs package talks to.
 
 **Manual, if you'd rather install them yourself:** drop the binaries at
 exactly `feynman-chiron-backend-install-dir`'s default location
-(`~/.emacs.d/bin/chiron-rs`, `~/.emacs.d/bin/chiron-ingest`) and they're
-auto-detected — no `PATH` or `feynman-chiron-backend-program` setup needed:
+(`bin/chiron-rs`, `bin/chiron-ingest` inside the package checkout) and
+they're auto-detected — no `PATH` or `feynman-chiron-backend-program`
+setup needed:
 
 ```bash
-mkdir -p ~/.emacs.d/bin
+cd ~/.emacs.d/elpa/feynman-chiron   # or wherever this package is checked out
+mkdir -p bin
 # Substitute -linux-arm64 / -darwin-arm64 for other platforms:
 for bin in chiron-rs chiron-ingest; do
-  curl -fL -o ~/.emacs.d/bin/$bin \
+  curl -fL -o bin/$bin \
     https://github.com/kamysh/feynman-chiron/releases/latest/download/$bin-linux-amd64
-  chmod +x ~/.emacs.d/bin/$bin
+  chmod +x bin/$bin
 done
 ```
 
@@ -199,8 +204,8 @@ Global settings (`M-x customize-group RET feynman-chiron RET`, or `setq`):
 | `feynman-chiron-anthropic-model` | `"claude-sonnet-4-6"` | Default Anthropic model name |
 | `feynman-chiron-openai-key` | `nil` | OpenAI API key: string, zero-arg function (e.g. `password-store-get`), or `nil` to fall back to `auth-source` (host `api.openai.com`) |
 | `feynman-chiron-anthropic-key` | `nil` | Anthropic API key: string, zero-arg function, or `nil` to fall back to `auth-source` (host `api.anthropic.com`) |
-| `feynman-chiron-backend-program` | `nil` | Path to the `chiron-rs` binary; `nil` auto-detects via `PATH`, then `chiron-rs/target/release/chiron-rs` next to the package, then `feynman-chiron-backend-install-dir`, then offers to install it |
-| `feynman-chiron-backend-install-dir` | `~/.emacs.d/bin/` | Where `feynman-chiron-install-backend` installs the binary it builds or downloads (deliberately outside your shell `PATH` — the binary has no standalone use) |
+| `feynman-chiron-backend-program` | `nil` | Path to the `chiron-rs` binary; `nil` auto-detects via `PATH`, then `chiron-rs/target/release/chiron-rs` next to the package, then `feynman-chiron-backend-install-dir`, then downloads it automatically |
+| `feynman-chiron-backend-install-dir` | `bin/` inside the package checkout | Where the prebuilt binary is downloaded to (deliberately outside your shell `PATH` — the binary has no standalone use) |
 | `feynman-chiron-endpoint-url` | `nil` | Base URL for an OpenAI-compatible endpoint (Groq, Mistral, Ollama, …) when provider is `openai`; defaults to `https://api.openai.com` |
 | `feynman-chiron-backend-buffer` | `" *feynman-backend*"` | Name of the buffer holding the backend process's stderr/stdout |
 

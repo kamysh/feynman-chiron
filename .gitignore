@@ -1,5 +1,6 @@
 /chiron-rs/target
 /result
+/bin
 /.envrc
 /.direnv
 /.muninn.toml
