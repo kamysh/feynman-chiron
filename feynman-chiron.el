@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025
 
 ;; Author: Valentyn
-;; Version: 2.0.0
+;; Version: 2.0.1
 ;; Package-Requires: ((emacs "27.1") (transient "0.3.0"))
 ;; Keywords: learning, education, ai
 ;; URL: https://github.com/kamysh/feynman-chiron
@@ -307,44 +307,15 @@ Returns the installed path, or signals an error."
       (message "Installed %s to %s" binary-name dest)
       dest)))
 
-(defun feynman-chiron--has-source-tree-p ()
-  "Non-nil if a chiron-rs/ Rust source tree sits next to this package."
-  (file-exists-p (expand-file-name "chiron-rs/Cargo.toml" feynman-chiron--package-dir)))
-
-(defun feynman-chiron--build-binary (binary-name)
-  "Build BINARY-NAME from source via Nix.
-Only usable when this package was loaded from a checkout that also
-has the chiron-rs/ Rust source tree (i.e. the git repo, not a release
-tarball of just the .el file). Both binaries share one Nix build.
-Returns the installed path, or signals an error."
-  (let ((default-directory feynman-chiron--package-dir))
-    (unless (feynman-chiron--has-source-tree-p)
-      (error "No chiron-rs source tree found next to feynman-chiron.el"))
-    (unless (executable-find "nix")
-      (error "Nix not found on PATH; cannot build %s from source" binary-name))
-    (message "Building %s via Nix (this can take several minutes)..." binary-name)
-    (with-temp-buffer
-      (let ((status (call-process "nix" nil t nil "build" ".#chiron-rs")))
-        (unless (zerop status)
-          (error "nix build .#chiron-rs failed:\n%s" (buffer-string)))))
-    (make-directory feynman-chiron-backend-install-dir t)
-    (let ((built (expand-file-name (concat "result/bin/" binary-name) feynman-chiron--package-dir))
-          (dest (expand-file-name binary-name feynman-chiron-backend-install-dir)))
-      (unless (file-exists-p built)
-        (error "nix build succeeded but %s is missing" built))
-      (copy-file built dest t)
-      (set-file-modes dest #o755)
-      (message "Installed %s to %s" binary-name dest)
-      dest)))
-
 (defun feynman-chiron--install-binary (binary-name)
-  "Install BINARY-NAME (\"chiron-rs\" or \"chiron-ingest\").
-Builds from source via Nix when a source checkout is available,
-otherwise downloads the prebuilt release binary for this platform.
-Returns the installed path."
-  (if (and (feynman-chiron--has-source-tree-p) (executable-find "nix"))
-      (feynman-chiron--build-binary binary-name)
-    (feynman-chiron--download-binary binary-name)))
+  "Download the prebuilt BINARY-NAME binary for this platform.
+Returns the installed path. This is the only automatic install path —
+building from source via Nix is a manual developer workflow (see the
+README's \"local development\" section), never triggered automatically,
+because a source tree happening to be present next to the package
+(e.g. every `package-vc-install' checkout includes it) is not evidence
+anyone wants to pay for a from-source build."
+  (feynman-chiron--download-binary binary-name))
 
 ;;;###autoload
 (defun feynman-chiron-install-backend ()
@@ -372,59 +343,60 @@ whitespace-separated token is taken as the version."
     (when (ignore-errors (zerop (call-process binary-path nil t nil "--version")))
       (car (last (split-string (string-trim (buffer-string))))))))
 
-(defun feynman-chiron--maybe-offer-reinstall (binary-name path)
-  "Return PATH, after checking it against this package's own version.
-If PATH's --version output names a different version than the package
-checkout's own Version header, offer to reinstall BINARY-NAME when
-Emacs is interactive; otherwise just warn once via `message'. Always
-returns PATH — this is a nag, not a hard gate, since a stale binary is
-usually still usable until it actually breaks."
+(defun feynman-chiron--ensure-fresh (binary-name path)
+  "Return PATH, silently reinstalling BINARY-NAME first if it's stale.
+\"Stale\" means PATH's --version disagrees with the package's own
+Version header. No prompt — a user should never have to decide
+whether to update a backend binary; a network failure here just
+leaves the old (still usually usable) binary in place, reported via
+`message', not an error."
   (let ((pkg-version (feynman-chiron--package-version))
         (bin-version (feynman-chiron--binary-version path)))
     (if (and pkg-version bin-version (not (equal pkg-version bin-version)))
-        (if (and (not noninteractive)
-                 (y-or-n-p
-                  (format "%s binary is v%s but the package is v%s — reinstall now? "
-                          binary-name bin-version pkg-version)))
-            (condition-case err
-                (feynman-chiron--install-binary binary-name)
-              (error
-               (message "Reinstall failed: %s" (error-message-string err))
-               path))
-          (message "%s binary is v%s but the package is v%s; M-x feynman-chiron-install-backend to update"
-                   binary-name bin-version pkg-version)
-          path)
+        (condition-case err
+            (feynman-chiron--install-binary binary-name)
+          (error
+           (message "feynman-chiron: %s is v%s (package is v%s) and reinstalling it failed: %s"
+                     binary-name bin-version pkg-version (error-message-string err))
+           path))
       path)))
 
 (defun feynman-chiron--find-binary (binary-name)
   "Find the BINARY-NAME executable, installing it if necessary.
 Looks on PATH, next to the package source, in
-`feynman-chiron-backend-install-dir', then offers to install it.
-A binary found in `feynman-chiron-backend-install-dir' — one this
-package installed itself, as opposed to one on PATH or explicitly set
-via `feynman-chiron-backend-program', both of which are the user's
-own choice and never second-guessed this way — is checked against the
-package's own version; see `feynman-chiron--maybe-offer-reinstall'."
+`feynman-chiron-backend-install-dir', then installs it there — all
+silently, with no prompt; see `feynman-chiron--ensure-fresh' for how
+a stale previously-installed binary is handled the same way. PATH and
+`feynman-chiron-backend-program' are the user's own explicit choice
+and are never second-guessed or reinstalled."
   (or (and (equal binary-name "chiron-rs") feynman-chiron-backend-program)
       ;; Look in PATH first
       (executable-find binary-name)
-      ;; Then relative to the package directory (a `cargo build` dev tree)
+      ;; Then relative to the package directory (a `cargo build' dev tree)
       (let ((source-build (expand-file-name
                             (concat "chiron-rs/target/release/" binary-name)
                             feynman-chiron--package-dir)))
         (and (file-exists-p source-build) source-build))
-      ;; Then a prior auto-install, version-checked.
+      ;; Then a prior auto-install, kept up to date.
       (let ((installed (expand-file-name binary-name feynman-chiron-backend-install-dir)))
         (and (file-exists-p installed)
-             (feynman-chiron--maybe-offer-reinstall binary-name installed)))
-      ;; Not found anywhere: offer to install it now.
-      (when (and (not noninteractive)
-                 (y-or-n-p (format "%s binary not found. Install it now? " binary-name)))
-        (condition-case err
-            (feynman-chiron--install-binary binary-name)
-          (error
-           (message "Automatic install failed: %s" (error-message-string err))
-           nil)))))
+             (feynman-chiron--ensure-fresh binary-name installed)))
+      ;; Not found anywhere: install it now, no prompt.
+      (condition-case err
+          (feynman-chiron--install-binary binary-name)
+        (error
+         (message "feynman-chiron: could not install %s: %s"
+                   binary-name (error-message-string err))
+         nil))))
+
+(defun feynman-chiron--ensure-backend-installed ()
+  "Silently install any missing chiron-rs/chiron-ingest binaries.
+Run once, shortly after the package loads (see the `run-with-idle-timer'
+call below) — a user should never have to invoke an install command or
+answer a prompt just to use this package; by the time they run
+`feynman-chiron-start' the backend is normally already there."
+  (dolist (binary-name feynman-chiron--binaries)
+    (feynman-chiron--find-binary binary-name)))
 
 ;;; Textbook ingestion (chiron-ingest)
 
@@ -1043,6 +1015,14 @@ Commands:
 
     (switch-to-buffer buffer)
     (goto-char (point-max)))))
+
+;; Ensure the backend is installed automatically, once, shortly after
+;; Emacs is idle — not synchronously at load time (that would add a
+;; network round-trip to every startup's load sequence) and not
+;; unconditionally in noninteractive Emacs (byte-compilation, batch
+;; tooling, tests all `require' this file without wanting a download).
+(unless noninteractive
+  (run-with-idle-timer 1 nil #'feynman-chiron--ensure-backend-installed))
 
 (provide 'feynman-chiron)
 

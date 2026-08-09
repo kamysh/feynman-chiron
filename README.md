@@ -14,14 +14,19 @@ not blind free text.
 - Emacs with org-mode
 - `transient` (ships with Emacs 28+ / commonly already installed via magit)
 - API key: Anthropic or OpenAI (only for the agent — textbook ingestion embeds locally, no key needed)
-- Nix (for building the Rust binaries), unless installing prebuilt release binaries
-- Network access to huggingface.co the *first* time `chiron-rs` or `chiron-ingest`
-  runs (see [Embedding model](#embedding-model) below) — not needed after that
+- Network access to github.com the first time the package loads (to download
+  the prebuilt `chiron-rs`/`chiron-ingest` binaries — automatic, see below)
+  and to huggingface.co the first time either binary actually runs (see
+  [Embedding model](#embedding-model) below) — neither needed after that
+
+Nix is **not** required. Building from source is a manual developer workflow
+only (see "For local development" below) — most people never need it.
 
 ## Installation
 
-Feynman Chiron isn't on MELPA — install directly from the GitHub repo, then build
-the `chiron-rs` backend binary.
+Feynman Chiron isn't on MELPA — install directly from the GitHub repo. The
+backend binaries install themselves automatically the first time Emacs is
+idle after loading the package — nothing else to run.
 
 ### 1. Get the Emacs package
 
@@ -72,64 +77,42 @@ git clone https://github.com/kamysh/feynman-chiron.git ~/.emacs.d/site-lisp/feyn
 
 The Emacs package is only the frontend — it drives two separate Rust binaries as
 subprocesses: `chiron-rs` (the agent) and `chiron-ingest` (textbook ingestion).
-Both are built from the same `chiron-rs/` Nix workspace.
 
-**Automatic (recommended):** just run `M-x feynman-chiron-start` (or
-`M-x feynman-chiron-ingest-textbook`). If the binary it needs isn't found, Emacs
-asks to install it, then does so itself — no shell commands needed:
-
-- If you installed via a git clone/submodule that includes the `chiron-rs/`
-  source tree and you have [Nix](https://nixos.org/) on `PATH`, it runs
-  `nix build .#chiron-rs` (produces both binaries) and copies the result in.
-- Otherwise it downloads the prebuilt binary for your platform from
-  [Releases](https://github.com/kamysh/feynman-chiron/releases).
-
-Either way the binaries land in `feynman-chiron-backend-install-dir` (default
-`~/.emacs.d/bin/`) and are auto-detected from then on. You can also trigger
-this directly: `M-x feynman-chiron-install-backend` (installs both).
+**This is automatic — there is nothing to run.** Shortly after the package
+loads (once Emacs is idle), it downloads the prebuilt release binary for your
+platform from [Releases](https://github.com/kamysh/feynman-chiron/releases)
+for anything missing, into `feynman-chiron-backend-install-dir` (default
+`~/.emacs.d/bin/`), with no prompt. The same thing happens if a binary there
+is ever found to be a different version than the currently-loaded package —
+you never need to remember to update it yourself. `M-x feynman-chiron-install-backend`
+exists if you want to force a (re)install right now instead of waiting for
+the next idle moment.
 
 Neither binary has any use outside this package, so they're deliberately kept
 out of your shell `PATH` — these aren't general-purpose CLI tools to install
 system-wide, they only exist as subprocesses the Emacs package talks to.
 
-**Updating:** `M-x package-vc-upgrade` (or `package-vc-upgrade-all`) updates
-`feynman-chiron.el` itself — a `git pull` on the vc-managed checkout — but on
-its own does **not** touch the binaries, which are cached indefinitely once
-installed. To close that gap, every use of an auto-installed binary compares
-its `--version` output against the package's own `;; Version:` header
-(`feynman-chiron.el:6`) and offers to reinstall it on a mismatch, so a stale
-binary after an upgrade gets caught on next use rather than failing silently
-in whatever way the drift happens to produce. This check only applies to
-binaries this package installed itself (in `feynman-chiron-backend-install-dir`)
-— one found on `PATH` or set via `feynman-chiron-backend-program` is your own
-explicit choice and is never second-guessed this way.
-
-**Manual, if you'd rather not let Emacs run `nix build`/download things:** drop
-the binaries at exactly `feynman-chiron-backend-install-dir`'s default location
+**Manual, if you'd rather install them yourself:** drop the binaries at
+exactly `feynman-chiron-backend-install-dir`'s default location
 (`~/.emacs.d/bin/chiron-rs`, `~/.emacs.d/bin/chiron-ingest`) and they're
 auto-detected — no `PATH` or `feynman-chiron-backend-program` setup needed:
 
 ```bash
 mkdir -p ~/.emacs.d/bin
-
-# Prebuilt release binaries (substitute -linux-arm64 / -darwin-arm64 for
-# other platforms):
+# Substitute -linux-arm64 / -darwin-arm64 for other platforms:
 for bin in chiron-rs chiron-ingest; do
   curl -fL -o ~/.emacs.d/bin/$bin \
     https://github.com/kamysh/feynman-chiron/releases/latest/download/$bin-linux-amd64
   chmod +x ~/.emacs.d/bin/$bin
 done
-
-# Or build from source (requires Nix) — one build produces both binaries:
-cd feynman-chiron
-nix build .#chiron-rs   # static binaries at result/bin/{chiron-rs,chiron-ingest}
-install -m 755 result/bin/chiron-rs ~/.emacs.d/bin/chiron-rs
-install -m 755 result/bin/chiron-ingest ~/.emacs.d/bin/chiron-ingest
 ```
 
-For local development (dynamic build, faster iteration): `nix develop`, then
-`cd chiron-rs && cargo build --release` — picked up automatically from
-`chiron-rs/target/release/{chiron-rs,chiron-ingest}` next to the package source.
+**For local development** (building from source instead of downloading —
+requires [Nix](https://nixos.org/), never done automatically): `nix develop`,
+then `cd chiron-rs && cargo build --release` — picked up automatically from
+`chiron-rs/target/release/{chiron-rs,chiron-ingest}` next to the package
+source, ahead of any auto-installed binary. A fully static release build is
+`nix build .#chiron-rs` (produces both binaries at `result/bin/`).
 
 ### 3. Configure
 
