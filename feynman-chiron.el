@@ -35,6 +35,8 @@
 (require 'lisp-mnt)
 (require 'transient)
 
+(declare-function org-indent-mode "org-indent" (&optional arg))
+
 (defconst feynman-chiron--package-dir
   (file-name-directory
    (or load-file-name buffer-file-name (locate-library "feynman-chiron")))
@@ -169,18 +171,18 @@ Plist containing:
 
 (defcustom feynman-chiron-backend-program nil
   "Path to the chiron-rs binary.
-If nil, looks for 'chiron-rs' on PATH and in the package directory."
+If nil, looks for \\='chiron-rs\\=' on PATH and in the package directory."
   :type '(choice (const :tag "Auto-detect" nil)
                  (file :tag "Path to binary"))
   :group 'feynman-chiron)
 
 (defcustom feynman-chiron-endpoint-url nil
   "Base URL for OpenAI-compatible LLM endpoint.
-Required when CHIRON_PROVIDER is 'openai-compat' (Groq, Mistral, Ollama, etc.).
+Required when CHIRON_PROVIDER is \\='openai-compat\\=' (Groq, Mistral, Ollama, etc.).
 Examples:
   Groq:   https://api.groq.com/openai
   Ollama: http://localhost:11434/v1
-If nil, defaults to https://api.openai.com when provider is 'openai'."
+If nil, defaults to https://api.openai.com when provider is \\='openai\\='."
   :type '(choice (const :tag "Default (OpenAI)" nil)
                  (string :tag "Endpoint URL"))
   :group 'feynman-chiron)
@@ -237,7 +239,8 @@ Format 3 - Mixed:
 
 Set via file-local variables:
   # Local Variables:
-  # feynman-chiron-textbook-sources: ((\"dummit-foote\" . \"math\") (\"lang\" . \"math\"))
+  # feynman-chiron-textbook-sources: ((\"dummit-foote\" . \"math\")
+  #   (\"lang\" . \"math\"))
   # End:
 
 The agent queries all specified sources.")
@@ -660,7 +663,8 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
                  (cons 'error (format "JSON parse error: %s" err)))))))))
 
 (defun feynman-chiron--backend-ready-p ()
-  "Check if backend is ready and textbook sources are configured for current buffer."
+  "Check if backend is ready and textbook sources are configured for
+current buffer."
   (and feynman-chiron-textbook-sources
        (condition-case nil
            (progn
