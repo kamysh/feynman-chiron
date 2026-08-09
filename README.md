@@ -85,6 +85,18 @@ Neither binary has any use outside this package, so they're deliberately kept
 out of your shell `PATH` — these aren't general-purpose CLI tools to install
 system-wide, they only exist as subprocesses the Emacs package talks to.
 
+**Updating:** `M-x package-vc-upgrade` (or `package-vc-upgrade-all`) updates
+`feynman-chiron.el` itself — a `git pull` on the vc-managed checkout — but on
+its own does **not** touch the binaries, which are cached indefinitely once
+installed. To close that gap, every use of an auto-installed binary compares
+its `--version` output against the package's own `;; Version:` header
+(`feynman-chiron.el:6`) and offers to reinstall it on a mismatch, so a stale
+binary after an upgrade gets caught on next use rather than failing silently
+in whatever way the drift happens to produce. This check only applies to
+binaries this package installed itself (in `feynman-chiron-backend-install-dir`)
+— one found on `PATH` or set via `feynman-chiron-backend-program` is your own
+explicit choice and is never second-guessed this way.
+
 **Manual, if you'd rather not let Emacs run `nix build`/download things:** drop
 the binaries at exactly `feynman-chiron-backend-install-dir`'s default location
 (`~/.emacs.d/bin/chiron-rs`, `~/.emacs.d/bin/chiron-ingest`) and they're

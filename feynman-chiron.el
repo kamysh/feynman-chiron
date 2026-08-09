@@ -32,6 +32,7 @@
 ;;; Code:
 
 (require 'json)
+(require 'lisp-mnt)
 
 (defconst feynman-chiron--package-dir
   (file-name-directory
@@ -354,21 +355,67 @@ Returns the installed path of chiron-rs, for backwards compatibility."
     (feynman-chiron--install-binary "chiron-ingest")
     chiron-rs-path))
 
+(defun feynman-chiron--package-version ()
+  "Return this package's own version, from feynman-chiron.el's Version header."
+  (let ((file (expand-file-name "feynman-chiron.el" feynman-chiron--package-dir)))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file nil 0 4096)
+        (lm-header "version")))))
+
+(defun feynman-chiron--binary-version (binary-path)
+  "Return BINARY-PATH's reported version via --version, or nil.
+Expects output of the form \"chiron-rs 2.0.0\" — the last
+whitespace-separated token is taken as the version."
+  (with-temp-buffer
+    (when (ignore-errors (zerop (call-process binary-path nil t nil "--version")))
+      (car (last (split-string (string-trim (buffer-string))))))))
+
+(defun feynman-chiron--maybe-offer-reinstall (binary-name path)
+  "Return PATH, after checking it against this package's own version.
+If PATH's --version output names a different version than the package
+checkout's own Version header, offer to reinstall BINARY-NAME when
+Emacs is interactive; otherwise just warn once via `message'. Always
+returns PATH — this is a nag, not a hard gate, since a stale binary is
+usually still usable until it actually breaks."
+  (let ((pkg-version (feynman-chiron--package-version))
+        (bin-version (feynman-chiron--binary-version path)))
+    (if (and pkg-version bin-version (not (equal pkg-version bin-version)))
+        (if (and (not noninteractive)
+                 (y-or-n-p
+                  (format "%s binary is v%s but the package is v%s — reinstall now? "
+                          binary-name bin-version pkg-version)))
+            (condition-case err
+                (feynman-chiron--install-binary binary-name)
+              (error
+               (message "Reinstall failed: %s" (error-message-string err))
+               path))
+          (message "%s binary is v%s but the package is v%s; M-x feynman-chiron-install-backend to update"
+                   binary-name bin-version pkg-version)
+          path)
+      path)))
+
 (defun feynman-chiron--find-binary (binary-name)
   "Find the BINARY-NAME executable, installing it if necessary.
 Looks on PATH, next to the package source, in
-`feynman-chiron-backend-install-dir', then offers to install it."
+`feynman-chiron-backend-install-dir', then offers to install it.
+A binary found in `feynman-chiron-backend-install-dir' — one this
+package installed itself, as opposed to one on PATH or explicitly set
+via `feynman-chiron-backend-program', both of which are the user's
+own choice and never second-guessed this way — is checked against the
+package's own version; see `feynman-chiron--maybe-offer-reinstall'."
   (or (and (equal binary-name "chiron-rs") feynman-chiron-backend-program)
       ;; Look in PATH first
       (executable-find binary-name)
-      ;; Then relative to the package directory / a prior auto-install
-      (let ((candidates (list
-                         (expand-file-name
-                          (concat "chiron-rs/target/release/" binary-name)
-                          feynman-chiron--package-dir)
-                         (expand-file-name
-                          binary-name feynman-chiron-backend-install-dir))))
-        (seq-find #'file-exists-p candidates))
+      ;; Then relative to the package directory (a `cargo build` dev tree)
+      (let ((source-build (expand-file-name
+                            (concat "chiron-rs/target/release/" binary-name)
+                            feynman-chiron--package-dir)))
+        (and (file-exists-p source-build) source-build))
+      ;; Then a prior auto-install, version-checked.
+      (let ((installed (expand-file-name binary-name feynman-chiron-backend-install-dir)))
+        (and (file-exists-p installed)
+             (feynman-chiron--maybe-offer-reinstall binary-name installed)))
       ;; Not found anywhere: offer to install it now.
       (when (and (not noninteractive)
                  (y-or-n-p (format "%s binary not found. Install it now? " binary-name)))

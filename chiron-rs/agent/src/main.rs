@@ -29,6 +29,11 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    if matches!(env::args().nth(1).as_deref(), Some("--version") | Some("-V")) {
+        println!("chiron-rs {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let provider     = build_provider()?;
     let database_url = env::var("CHIRON_DATABASE_URL")
         .context("CHIRON_DATABASE_URL is required")?;

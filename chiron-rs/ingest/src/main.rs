@@ -11,6 +11,7 @@ fn usage() -> &'static str {
     "Feynman Chiron textbook storage (Rust)
 
 Usage:
+  chiron-ingest --version
   chiron-ingest create-schema <db-url> <schema>...
   chiron-ingest ingest --schema <schema> [--model <hf-model-id>] <db-url> <pdf-path> <textbook-name>
   chiron-ingest search --schema <schema> [-k <n>] <db-url> <textbook-name> <query>
@@ -37,6 +38,10 @@ async fn main() -> ExitCode {
 async fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--version") | Some("-V") => {
+            println!("chiron-ingest {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("create-schema") => cmd_create_schema(&args[1..]).await,
         Some("ingest")        => cmd_ingest(&args[1..]).await,
         Some("search")        => cmd_search(&args[1..]).await,
