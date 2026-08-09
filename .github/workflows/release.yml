@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact: linux-amd64
+          - runner: ubuntu-24.04-arm
+            artifact: linux-arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v14
+        with:
+          flakehub: false
+
+      - name: Build
+        run: nix build .#chiron-rs
+
+      - name: Stage binary
+        run: install -m 755 result/bin/chiron-rs chiron-rs-${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chiron-rs-${{ matrix.artifact }}
+          path: chiron-rs-${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write   # publish the release + assets
+      actions: write    # delete superseded Actions artifacts (prune step)
+
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            chiron-rs-linux-amd64/chiron-rs-linux-amd64
+            chiron-rs-linux-arm64/chiron-rs-linux-arm64
+
+      # Keep only THIS release's per-platform binaries as Actions artifacts.
+      # The distributable binaries live on the GitHub Release (published above).
+      # This step deletes every Actions artifact from a PRIOR run, so exactly
+      # one latest binary per platform remains and Actions storage does not
+      # grow unbounded.
+      - name: Prune superseded Actions artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Keeping artifacts from run ${{ github.run_id }}; deleting older ones."
+          gh api --paginate \
+            "repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.workflow_run.id != ${{ github.run_id }}) | .id' \
+          | while read -r id; do
+              echo "Deleting artifact $id"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
+            done

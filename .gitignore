@@ -1,0 +1,9 @@
+/chiron-rs/target
+/result
+/.envrc
+/.direnv
+/.muninn.toml
+__pycache__/
+*.pyc
+.pytest_cache/
+*.elc

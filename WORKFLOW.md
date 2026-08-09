@@ -84,10 +84,9 @@ Use domain/textbook_name columns to separate instead of schemas.
 ### 1. Install Feynman Chiron
 
 ```bash
-# Copy files to Emacs directory
-mkdir -p ~/.emacs.d/my/feynman-chiron
-cd /path/to/feynman-chiron-package
-cp feynman-chiron.el chiron_agent.py chiron_storage.py ~/.emacs.d/my/feynman-chiron/
+# Clone (or symlink) the package into your Emacs directory
+git clone git@github.com:kamysh/feynman-chiron.git ~/.emacs.d/my/feynman-chiron
+cd ~/.emacs.d/my/feynman-chiron && nix build .#chiron-rs
 
 # Add to ~/.emacs.d/init.el
 (add-to-list 'load-path "~/.emacs.d/my/feynman-chiron")
