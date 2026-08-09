@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 use reqwest::Client;
 
+use chiron_core::{Embedder, Storage};
+
 use crate::{
-    embeddings::Embedder,
     llm::chat,
-    storage::Storage,
     types::{ChironState, Gap, Provider, Stage},
 };
 

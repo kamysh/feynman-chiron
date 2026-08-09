@@ -1,5 +1,5 @@
 {
-  description = "Feynman Chiron — Rust agent backend + Python textbook ingest";
+  description = "Feynman Chiron — Rust agent backend + Rust textbook ingest";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -16,9 +16,9 @@
         # frameworks (there is no static libc equivalent there).
         staticPkgs = pkgs.pkgsStatic;
 
-        # ── Rust package (statically linked musl binary) ─────────────────────
+        # ── Rust workspace (chiron-rs agent + chiron-ingest, statically linked) ──
         #
-        # On Linux: musl via pkgsStatic → fully static binary. hf-hub's
+        # On Linux: musl via pkgsStatic → fully static binaries. hf-hub's
         # HTTP client links against OpenSSL; pkgsStatic provides the static
         # libssl/libcrypto. On macOS: Security.framework is a system
         # framework linked automatically, no extra inputs needed (same
@@ -31,8 +31,11 @@
         # disable PIE for that one target. darwin and aarch64-linux link
         # fine without this (verified in muninn's flake.nix, same esaxx-rs
         # dependency).
-        chiron-rs = staticPkgs.rustPlatform.buildRustPackage ({
-          pname   = "chiron-rs";
+        #
+        # buildRustPackage builds every workspace member by default, so this
+        # one derivation's $out/bin has both chiron-rs and chiron-ingest.
+        chiron = staticPkgs.rustPlatform.buildRustPackage ({
+          pname   = "feynman-chiron";
           version = "0.1.0";
           src     = ./chiron-rs;
 
@@ -54,26 +57,15 @@
           RUSTFLAGS = "-C relocation-model=static";
         });
 
-        # ── Python env for textbook ingestion (chiron_storage.py) ────────────
-        pythonEnv = pkgs.python3.withPackages (ps: with ps; [
-          langchain-community
-          psycopg2
-          pypdf
-          numpy
-          sentence-transformers
-          pytest
-          pytest-mock
-        ]);
-
       in {
-        # nix build  →  result/bin/chiron-rs  (static musl binary, no glibc dep)
-        packages.default = chiron-rs;
-        packages.chiron-rs = chiron-rs;
+        # nix build  →  result/bin/{chiron-rs,chiron-ingest}  (static musl, no glibc dep)
+        packages.default       = chiron;
+        packages.chiron-rs     = chiron;
+        packages.chiron-ingest = chiron;
 
         # nix develop  (dynamic, for cargo build --release during development)
         devShells.default = pkgs.mkShell {
           buildInputs = [
-            pythonEnv
             pkgs.cargo
             pkgs.rustc
             pkgs.rust-analyzer
@@ -87,10 +79,9 @@
 
           shellHook = ''
             echo "Feynman Chiron dev shell"
-            echo "  Python (ingest): $(python3 --version)"
-            echo "  Rust (agent):    $(rustc --version)"
+            echo "  Rust: $(rustc --version)"
             echo ""
-            echo "Build (dynamic):  cargo build --release   (in chiron-rs/)"
+            echo "Build (dynamic):  cargo build --release   (in chiron-rs/, builds both binaries)"
             echo "Build (static):   nix build"
           '';
         };

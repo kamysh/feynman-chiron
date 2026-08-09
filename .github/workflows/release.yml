@@ -28,13 +28,20 @@ jobs:
       - name: Build
         run: nix build .#chiron-rs
 
-      - name: Stage binary
-        run: install -m 755 result/bin/chiron-rs chiron-rs-${{ matrix.artifact }}
+      - name: Stage binaries
+        run: |
+          install -m 755 result/bin/chiron-rs chiron-rs-${{ matrix.artifact }}
+          install -m 755 result/bin/chiron-ingest chiron-ingest-${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: chiron-rs-${{ matrix.artifact }}
           path: chiron-rs-${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chiron-ingest-${{ matrix.artifact }}
+          path: chiron-ingest-${{ matrix.artifact }}
 
   release:
     needs: build
@@ -53,6 +60,9 @@ jobs:
             chiron-rs-linux-amd64/chiron-rs-linux-amd64
             chiron-rs-linux-arm64/chiron-rs-linux-arm64
             chiron-rs-darwin-arm64/chiron-rs-darwin-arm64
+            chiron-ingest-linux-amd64/chiron-ingest-linux-amd64
+            chiron-ingest-linux-arm64/chiron-ingest-linux-arm64
+            chiron-ingest-darwin-arm64/chiron-ingest-darwin-arm64
 
       # Keep only THIS release's per-platform binaries as Actions artifacts.
       # The distributable binaries live on the GitHub Release (published above).

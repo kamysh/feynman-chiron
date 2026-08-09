@@ -241,121 +241,186 @@ interleaved diagnostic text."
   :group 'feynman-chiron)
 
 (defconst feynman-chiron--github-repo "kamysh/feynman-chiron"
-  "GitHub \"owner/repo\" slug the chiron-rs binary is released from.")
+  "GitHub \"owner/repo\" slug the chiron-rs/chiron-ingest binaries are released from.")
+
+(defconst feynman-chiron--binaries '("chiron-rs" "chiron-ingest")
+  "Names of the Rust binaries this package drives as subprocesses.
+Both are built from the same chiron-rs/ Nix flake output.")
 
 (defcustom feynman-chiron-backend-install-dir
   (expand-file-name "bin/" user-emacs-directory)
-  "Directory `feynman-chiron-install-backend' installs chiron-rs into.
-The chiron-rs binary has no use outside this package, so it's kept
+  "Directory `feynman-chiron-install-backend' installs binaries into.
+These binaries have no use outside this package, so they're kept
 package-private here rather than added to your shell PATH;
-`feynman-chiron--find-backend' auto-detects it from this directory
+`feynman-chiron--find-binary' auto-detects them from this directory
 without any PATH or `feynman-chiron-backend-program' setup needed."
   :type 'directory
   :group 'feynman-chiron)
 
-(defun feynman-chiron--release-asset-name ()
-  "Return the chiron-rs release asset name for the current platform,
+(defun feynman-chiron--release-asset-name (binary-name)
+  "Return the release asset name for BINARY-NAME on the current platform,
 or nil if the platform isn't one we publish binaries for."
   (let ((arch (cond ((string-match-p "aarch64\\|arm64" system-configuration) "arm64")
                      ((string-match-p "x86_64" system-configuration) "amd64")
                      (t nil))))
     (when arch
       (pcase system-type
-        ('gnu/linux (format "chiron-rs-linux-%s" arch))
-        ('darwin    (format "chiron-rs-darwin-%s" arch))
+        ('gnu/linux (format "%s-linux-%s" binary-name arch))
+        ('darwin    (format "%s-darwin-%s" binary-name arch))
         (_ nil)))))
 
-(defun feynman-chiron--download-backend ()
-  "Download the prebuilt chiron-rs binary for this platform.
+(defun feynman-chiron--download-binary (binary-name)
+  "Download the prebuilt BINARY-NAME binary for this platform.
 Returns the installed path, or signals an error."
-  (let ((asset (feynman-chiron--release-asset-name)))
+  (let ((asset (feynman-chiron--release-asset-name binary-name)))
     (unless asset
-      (error "No prebuilt chiron-rs binary for this platform (%s/%s)"
-             system-type system-configuration))
+      (error "No prebuilt %s binary for this platform (%s/%s)"
+             binary-name system-type system-configuration))
     (require 'url)
     (make-directory feynman-chiron-backend-install-dir t)
-    (let ((dest (expand-file-name "chiron-rs" feynman-chiron-backend-install-dir))
+    (let ((dest (expand-file-name binary-name feynman-chiron-backend-install-dir))
           (url (format "https://github.com/%s/releases/latest/download/%s"
                        feynman-chiron--github-repo asset)))
       (message "Downloading %s..." url)
       (url-copy-file url dest t)
       (set-file-modes dest #o755)
-      (message "Installed chiron-rs to %s" dest)
+      (message "Installed %s to %s" binary-name dest)
       dest)))
 
 (defun feynman-chiron--has-source-tree-p ()
   "Non-nil if a chiron-rs/ Rust source tree sits next to this package."
   (file-exists-p (expand-file-name "chiron-rs/Cargo.toml" feynman-chiron--package-dir)))
 
-(defun feynman-chiron--build-backend ()
-  "Build chiron-rs from source via Nix.
+(defun feynman-chiron--build-binary (binary-name)
+  "Build BINARY-NAME from source via Nix.
 Only usable when this package was loaded from a checkout that also
 has the chiron-rs/ Rust source tree (i.e. the git repo, not a release
-tarball of just the .el file). Returns the installed path, or signals
-an error."
+tarball of just the .el file). Both binaries share one Nix build.
+Returns the installed path, or signals an error."
   (let ((default-directory feynman-chiron--package-dir))
     (unless (feynman-chiron--has-source-tree-p)
       (error "No chiron-rs source tree found next to feynman-chiron.el"))
     (unless (executable-find "nix")
-      (error "Nix not found on PATH; cannot build chiron-rs from source"))
-    (message "Building chiron-rs via Nix (this can take several minutes)...")
+      (error "Nix not found on PATH; cannot build %s from source" binary-name))
+    (message "Building %s via Nix (this can take several minutes)..." binary-name)
     (with-temp-buffer
       (let ((status (call-process "nix" nil t nil "build" ".#chiron-rs")))
         (unless (zerop status)
           (error "nix build .#chiron-rs failed:\n%s" (buffer-string)))))
     (make-directory feynman-chiron-backend-install-dir t)
-    (let ((built (expand-file-name "result/bin/chiron-rs" feynman-chiron--package-dir))
-          (dest (expand-file-name "chiron-rs" feynman-chiron-backend-install-dir)))
+    (let ((built (expand-file-name (concat "result/bin/" binary-name) feynman-chiron--package-dir))
+          (dest (expand-file-name binary-name feynman-chiron-backend-install-dir)))
       (unless (file-exists-p built)
         (error "nix build succeeded but %s is missing" built))
       (copy-file built dest t)
       (set-file-modes dest #o755)
-      (message "Installed chiron-rs to %s" dest)
+      (message "Installed %s to %s" binary-name dest)
       dest)))
 
-;;;###autoload
-(defun feynman-chiron-install-backend ()
-  "Install the chiron-rs backend binary.
+(defun feynman-chiron--install-binary (binary-name)
+  "Install BINARY-NAME (\"chiron-rs\" or \"chiron-ingest\").
 Builds from source via Nix when a source checkout is available,
 otherwise downloads the prebuilt release binary for this platform.
 Returns the installed path."
-  (interactive)
   (if (and (feynman-chiron--has-source-tree-p) (executable-find "nix"))
-      (feynman-chiron--build-backend)
-    (feynman-chiron--download-backend)))
+      (feynman-chiron--build-binary binary-name)
+    (feynman-chiron--download-binary binary-name)))
 
-(defun feynman-chiron--find-backend ()
-  "Find the chiron-rs binary, installing it if necessary.
+;;;###autoload
+(defun feynman-chiron-install-backend ()
+  "Install both the chiron-rs and chiron-ingest binaries.
+See `feynman-chiron--install-binary' for how each is obtained.
+Returns the installed path of chiron-rs, for backwards compatibility."
+  (interactive)
+  (let ((chiron-rs-path (feynman-chiron--install-binary "chiron-rs")))
+    (feynman-chiron--install-binary "chiron-ingest")
+    chiron-rs-path))
+
+(defun feynman-chiron--find-binary (binary-name)
+  "Find the BINARY-NAME executable, installing it if necessary.
 Looks on PATH, next to the package source, in
-`feynman-chiron-backend-install-dir', then offers to install it via
-`feynman-chiron-install-backend'."
-  (or feynman-chiron-backend-program
+`feynman-chiron-backend-install-dir', then offers to install it."
+  (or (and (equal binary-name "chiron-rs") feynman-chiron-backend-program)
       ;; Look in PATH first
-      (executable-find "chiron-rs")
+      (executable-find binary-name)
       ;; Then relative to the package directory / a prior auto-install
       (let ((candidates (list
                          (expand-file-name
-                          "chiron-rs/target/release/chiron-rs"
+                          (concat "chiron-rs/target/release/" binary-name)
                           feynman-chiron--package-dir)
                          (expand-file-name
-                          "chiron-rs" feynman-chiron-backend-install-dir))))
+                          binary-name feynman-chiron-backend-install-dir))))
         (seq-find #'file-exists-p candidates))
       ;; Not found anywhere: offer to install it now.
       (when (and (not noninteractive)
-                 (y-or-n-p "chiron-rs binary not found. Install it now? "))
+                 (y-or-n-p (format "%s binary not found. Install it now? " binary-name)))
         (condition-case err
-            (feynman-chiron-install-backend)
+            (feynman-chiron--install-binary binary-name)
           (error
            (message "Automatic install failed: %s" (error-message-string err))
            nil)))))
 
-(defun feynman-chiron--build-db-url (schema)
-  "Build database URL from base URL and SCHEMA name.
-Uses feynman-chiron-database-url as base."
-  (if (not feynman-chiron-database-url)
-      (error "No database URL configured. Set feynman-chiron-database-url")
-    (let ((base-url feynman-chiron-database-url))
-      (format "%s?options=-c%%20search_path=%s" base-url schema))))
+;;; Textbook ingestion (chiron-ingest)
+
+(defconst feynman-chiron--ingest-buffer "*chiron-ingest*"
+  "Buffer name for chiron-ingest's output.")
+
+(defun feynman-chiron--run-ingest (&rest args)
+  "Run chiron-ingest with ARGS; show output in `feynman-chiron--ingest-buffer'.
+Returns t on success (exit 0), signals an error otherwise."
+  (let ((binary (feynman-chiron--find-binary "chiron-ingest")))
+    (unless binary
+      (error "chiron-ingest binary not available"))
+    (let ((buffer (get-buffer-create feynman-chiron--ingest-buffer)))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t)) (erase-buffer)))
+      (display-buffer buffer)
+      (let ((status (apply #'call-process binary nil buffer t args)))
+        (unless (zerop status)
+          (error "chiron-ingest failed (exit %d); see %s" status feynman-chiron--ingest-buffer))
+        t))))
+
+(defun feynman-chiron--require-database-url (database-url)
+  "Return DATABASE-URL, or `feynman-chiron-database-url', or signal an error."
+  (or database-url feynman-chiron-database-url
+      (error "No database URL configured. Set feynman-chiron-database-url")))
+
+;;;###autoload
+(defun feynman-chiron-create-schema (database-url schema)
+  "Create SCHEMA on DATABASE-URL via chiron-ingest."
+  (interactive
+   (list (read-string "Database URL: " feynman-chiron-database-url)
+         (read-string "Schema name: ")))
+  (feynman-chiron--run-ingest "create-schema" database-url schema)
+  (message "Schema '%s' created (or already exists)" schema))
+
+;;;###autoload
+(defun feynman-chiron-ingest-textbook (pdf-path textbook-name schema &optional database-url)
+  "Ingest PDF-PATH as TEXTBOOK-NAME into SCHEMA via chiron-ingest.
+Uses `feynman-chiron-database-url' unless DATABASE-URL is given."
+  (interactive
+   (list (read-file-name "PDF file: " nil nil t)
+         (read-string "Textbook name: ")
+         (read-string "Schema: ")))
+  (let ((db-url (feynman-chiron--require-database-url database-url)))
+    (feynman-chiron--run-ingest
+     "ingest" "--schema" schema db-url (expand-file-name pdf-path) textbook-name)
+    (message "Ingested '%s' into schema '%s'" textbook-name schema)))
+
+;;;###autoload
+(defun feynman-chiron-search-textbook (textbook-name query schema &optional database-url k)
+  "Search TEXTBOOK-NAME in SCHEMA for QUERY via chiron-ingest.
+Uses `feynman-chiron-database-url' unless DATABASE-URL is given.
+Shows the top K (default 3) results in `feynman-chiron--ingest-buffer'."
+  (interactive
+   (list (read-string "Textbook name: ")
+         (read-string "Query: ")
+         (read-string "Schema: ")))
+  (let ((db-url (feynman-chiron--require-database-url database-url))
+        (args (list "search" "--schema" schema)))
+    (when k (setq args (append args (list "-k" (number-to-string k)))))
+    (setq args (append args (list db-url textbook-name query)))
+    (apply #'feynman-chiron--run-ingest args)))
 
 (defun feynman-chiron--normalize-textbook-sources ()
   "Normalize textbook sources to format expected by backend.
@@ -394,7 +459,7 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
     (unless feynman-chiron-learning-schema
       (error "No learning schema configured. Set feynman-chiron-learning-schema in file-local variables"))
 
-    (let ((binary (feynman-chiron--find-backend)))
+    (let ((binary (feynman-chiron--find-binary "chiron-rs")))
     (unless binary
       (error "Cannot find chiron-rs binary. Run M-x feynman-chiron-install-backend"))
 

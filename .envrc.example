@@ -14,16 +14,13 @@ export CHIRON_DATABASE_URL="postgresql://user:password@server:5432/chiron"
 # or with wildcards:
 # server:*:*:user:password
 
-# Retrieve OpenAI API key from running Emacs server
-# chiron_storage.py uses OpenAI for embeddings
-# This allows storing keys in ONE place: ~/.emacs.d/my/api-keys.el
-# Requires Emacs server to be running (emacs --daemon or server-start)
-export OPENAI_API_KEY=$(emacsclient --eval '(bound-and-true-p api-keys-openai-key)' 2>/dev/null | tr -d '"' || echo "")
+# No API key is needed here for textbook ingestion: chiron-ingest embeds
+# locally via a bundled MiniLM model (same as chiron-rs), not a cloud API.
+# CHIRON_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY are only needed by the
+# chiron-rs agent itself, configured via Emacs (feynman-chiron-anthropic-key
+# / feynman-chiron-openai-key), not this file.
 
-# Alternative: Set API key directly (not recommended - duplicates keys)
-# export OPENAI_API_KEY="sk-proj-..."
-
-# Use Nix flake for Python environment
+# Use Nix flake for the Rust toolchain
 use flake
 
 # After copying and editing, run:

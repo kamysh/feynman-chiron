@@ -1,0 +1,16 @@
+[package]
+name = "chiron-ingest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "chiron-ingest"
+path = "src/main.rs"
+
+[dependencies]
+chiron-core = { path = "../core" }
+tokio          = { workspace = true }
+serde_json     = { workspace = true }
+tokio-postgres = { workspace = true }
+anyhow         = { workspace = true }
+pdf-extract    = "0.7"

@@ -1,7 +1,5 @@
 mod agent;
-mod embeddings;
 mod llm;
-mod storage;
 mod types;
 
 use std::collections::HashMap;
@@ -11,11 +9,11 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result};
 use reqwest::Client;
 
+use chiron_core::{url::with_schema, Embedder, Storage};
+
 use crate::{
     agent::process_explanation,
-    embeddings::Embedder,
     llm::{model_name, provider_name},
-    storage::Storage,
     types::{Command, Provider, Response},
 };
 
@@ -166,26 +164,6 @@ fn build_provider() -> Result<Provider> {
             Ok(Provider::OpenAICompat { base_url, api_key, model })
         }
     }
-}
-
-fn with_schema(base_url: &str, schema: &str) -> String {
-    // Strip any existing options param, then re-add with schema search_path
-    let base = if let Some(pos) = base_url.find('?') {
-        &base_url[..pos]
-    } else {
-        base_url
-    };
-    let opts = urlencoding_simple(&format!("-c search_path={},ag_catalog,public", schema));
-    format!("{}?options={}", base, opts)
-}
-
-fn urlencoding_simple(s: &str) -> String {
-    s.chars().flat_map(|c| match c {
-        ' ' => vec!['%', '2', '0'],
-        '=' => vec!['%', '3', 'D'],
-        ',' => vec!['%', '2', 'C'],
-        c   => vec![c],
-    }).collect()
 }
 
 async fn build_textbook_pools(

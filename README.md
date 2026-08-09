@@ -5,9 +5,9 @@ Learn using the Feynman Technique with AI assistance. Explain concepts, get Socr
 ## Requirements
 
 - PostgreSQL with pgvector and Apache AGE extensions
-- Python environment (use flake.nix)
 - Emacs with org-mode
-- API key: Anthropic or OpenAI
+- API key: Anthropic or OpenAI (only for the agent — textbook ingestion embeds locally, no key needed)
+- Nix (for building the Rust binaries), unless installing prebuilt release binaries
 
 ## Installation
 
@@ -59,52 +59,56 @@ git clone https://github.com/kamysh/feynman-chiron.git ~/.emacs.d/site-lisp/feyn
 (require 'feynman-chiron)
 ```
 
-### 2. Get the agent backend
+### 2. Get the Rust binaries
 
-The Emacs package is only the frontend — it drives a separate `chiron-rs` binary
-as a subprocess.
+The Emacs package is only the frontend — it drives two separate Rust binaries as
+subprocesses: `chiron-rs` (the agent) and `chiron-ingest` (textbook ingestion).
+Both are built from the same `chiron-rs/` Nix workspace.
 
-**Automatic (recommended):** just run `M-x feynman-chiron-start`. If `chiron-rs`
-isn't found on `PATH` or already installed, Emacs asks to install it, then does
-so itself — no shell commands needed:
+**Automatic (recommended):** just run `M-x feynman-chiron-start` (or
+`M-x feynman-chiron-ingest-textbook`). If the binary it needs isn't found, Emacs
+asks to install it, then does so itself — no shell commands needed:
 
 - If you installed via a git clone/submodule that includes the `chiron-rs/`
   source tree and you have [Nix](https://nixos.org/) on `PATH`, it runs
-  `nix build .#chiron-rs` and copies the result in.
+  `nix build .#chiron-rs` (produces both binaries) and copies the result in.
 - Otherwise it downloads the prebuilt binary for your platform from
   [Releases](https://github.com/kamysh/feynman-chiron/releases).
 
-Either way the binary lands in `feynman-chiron-backend-install-dir` (default
-`~/.emacs.d/bin/`) and is auto-detected from then on. You can also trigger
-this directly: `M-x feynman-chiron-install-backend`.
+Either way the binaries land in `feynman-chiron-backend-install-dir` (default
+`~/.emacs.d/bin/`) and are auto-detected from then on. You can also trigger
+this directly: `M-x feynman-chiron-install-backend` (installs both).
 
-The binary has no use outside this package, so it's deliberately kept out of
-your shell `PATH` — this isn't a general-purpose CLI tool to install
-system-wide, it only exists as a subprocess the Emacs package talks to.
+Neither binary has any use outside this package, so they're deliberately kept
+out of your shell `PATH` — these aren't general-purpose CLI tools to install
+system-wide, they only exist as subprocesses the Emacs package talks to.
 
 **Manual, if you'd rather not let Emacs run `nix build`/download things:** drop
-the binary at exactly `feynman-chiron-backend-install-dir`'s default location
-(`~/.emacs.d/bin/chiron-rs`) and it's auto-detected — no `PATH` or
-`feynman-chiron-backend-program` setup needed:
+the binaries at exactly `feynman-chiron-backend-install-dir`'s default location
+(`~/.emacs.d/bin/chiron-rs`, `~/.emacs.d/bin/chiron-ingest`) and they're
+auto-detected — no `PATH` or `feynman-chiron-backend-program` setup needed:
 
 ```bash
 mkdir -p ~/.emacs.d/bin
 
-# Prebuilt release binary (substitute chiron-rs-linux-arm64 /
-# chiron-rs-darwin-arm64 for other platforms):
-curl -fL -o ~/.emacs.d/bin/chiron-rs \
-  https://github.com/kamysh/feynman-chiron/releases/latest/download/chiron-rs-linux-amd64
-chmod +x ~/.emacs.d/bin/chiron-rs
+# Prebuilt release binaries (substitute -linux-arm64 / -darwin-arm64 for
+# other platforms):
+for bin in chiron-rs chiron-ingest; do
+  curl -fL -o ~/.emacs.d/bin/$bin \
+    https://github.com/kamysh/feynman-chiron/releases/latest/download/$bin-linux-amd64
+  chmod +x ~/.emacs.d/bin/$bin
+done
 
-# Or build from source (requires Nix):
+# Or build from source (requires Nix) — one build produces both binaries:
 cd feynman-chiron
-nix build .#chiron-rs   # static binary at result/bin/chiron-rs
+nix build .#chiron-rs   # static binaries at result/bin/{chiron-rs,chiron-ingest}
 install -m 755 result/bin/chiron-rs ~/.emacs.d/bin/chiron-rs
+install -m 755 result/bin/chiron-ingest ~/.emacs.d/bin/chiron-ingest
 ```
 
 For local development (dynamic build, faster iteration): `nix develop`, then
 `cd chiron-rs && cargo build --release` — picked up automatically from
-`chiron-rs/target/release/chiron-rs` next to the package source.
+`chiron-rs/target/release/{chiron-rs,chiron-ingest}` next to the package source.
 
 ### 3. Configure
 
@@ -113,7 +117,7 @@ program path:
 
 ```elisp
 (setq feynman-chiron-database-url "postgresql://host/chiron")
-(setq feynman-chiron-backend-program "~/.local/bin/chiron-rs")  ; omit if on PATH
+(setq feynman-chiron-backend-program "~/.emacs.d/bin/chiron-rs")  ; omit if auto-detected
 ```
 
 API keys: set `feynman-chiron-anthropic-key` / `feynman-chiron-openai-key`
@@ -133,11 +137,10 @@ CREATE EXTENSION vector;
 CREATE EXTENSION age;
 ```
 
-**Create schemas (as needed):**
+**Create schemas (as needed)** — via Emacs, `M-x feynman-chiron-create-schema`, or the CLI directly:
 
 ```bash
-# Create schemas when you need them
-python3 chiron_storage.py create-schema "postgresql://host/chiron" learning math
+chiron-ingest create-schema "postgresql://host/chiron" learning math
 ```
 
 Or manually:
@@ -148,13 +151,17 @@ CREATE SCHEMA math;
 
 ### 5. Ingest Textbooks (Optional)
 
+`M-x feynman-chiron-ingest-textbook` (prompts for PDF path, textbook name, schema),
+or the CLI directly:
+
 ```bash
-export OPENAI_API_KEY="sk-..."
-python3 chiron_storage.py ingest \
-  "postgresql://host/chiron" --schema math \
-  ~/textbooks/book.pdf \
-  "book-name"
+chiron-ingest ingest --schema math "postgresql://host/chiron" ~/textbooks/book.pdf "book-name"
 ```
+
+No API key needed — embeddings are generated locally (same MiniLM model
+`chiron-rs` uses at query time), so ingestion works fully offline aside from
+the database connection. Test retrieval with `M-x feynman-chiron-search-textbook`
+or `chiron-ingest search --schema math "postgresql://host/chiron" "book-name" "your query"`.
 
 ## Configuration
 
@@ -235,27 +242,34 @@ In Emacs:
 - `M-x feynman-chiron-start` - Start session
 - `C-c C-c` - Submit explanation
 - `C-c C-p` - Show progress
+- `M-x feynman-chiron-create-schema` - Create a PostgreSQL schema
+- `M-x feynman-chiron-ingest-textbook` - Ingest a PDF textbook
+- `M-x feynman-chiron-search-textbook` - Test retrieval against an ingested textbook
+- `M-x feynman-chiron-install-backend` - (Re)install the chiron-rs/chiron-ingest binaries
 
 ## Architecture
 
+Everything is Rust — no Python anywhere in this package.
+
 - **feynman-chiron.el**: Emacs interface
-- **chiron-rs/**: Rust agent backend (retrieve → analyze → probe/evaluate pipeline),
-  speaks the same stdin/stdout JSON protocol the Emacs frontend expects. Embeds a
-  MiniLM sentence-transformer via `candle` for retrieval; talks to Anthropic natively
-  or any OpenAI-compatible endpoint. See `docs/superpowers/specs/2026-06-01-chiron-rs-design.md`
-  for the design.
-- **chiron_storage.py**: standalone Python CLI for offline textbook ingestion
+- **chiron-rs/agent/** (binary `chiron-rs`): the agent backend (retrieve → analyze
+  → probe/evaluate pipeline), speaks the same stdin/stdout JSON protocol the Emacs
+  frontend expects. Talks to Anthropic natively or any OpenAI-compatible endpoint.
+  See `docs/superpowers/specs/2026-06-01-chiron-rs-design.md` for the design.
+- **chiron-rs/ingest/** (binary `chiron-ingest`): offline textbook ingestion CLI
   (PDF → chunks → pgvector embeddings) and schema creation — not part of the live
-  agent loop.
+  agent loop, invoked as its own subprocess.
+- **chiron-rs/core/** (library `chiron-core`): shared code between the two binaries
+  — the MiniLM embedder (`candle`) and PostgreSQL/pgvector storage layer.
 - Per-buffer backend: each org file gets its own `chiron-rs` process
 - Per-file configuration: databases specified in file-local variables
 
 ## Files
 
 - `feynman-chiron.el` - Emacs interface
-- `chiron-rs/` - Rust agent backend (the live runtime)
-- `chiron_storage.py` - Offline ingestion CLI (create-schema / ingest)
-- `flake.nix` - Nix development environment + static binary build
+- `chiron-rs/` - Rust workspace: `agent/` (chiron-rs), `ingest/` (chiron-ingest),
+  `core/` (shared library)
+- `flake.nix` - Nix development environment + static binary build (both binaries)
 - `.envrc.example` - Example direnv configuration
 - `.dir-locals.el.example` - Example Emacs directory-local settings
 - `WORKFLOW.md` - Comprehensive multi-project workflow guide

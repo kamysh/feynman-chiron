@@ -9,11 +9,11 @@ How to work on multiple learning projects with Feynman Chiron.
 ```
 Emacs
 ├── Buffer: algebra.org
-│   ├── Python backend (PID 1234)
+│   ├── chiron-rs backend (PID 1234)
 │   └── Databases: postgresql://server/learning + postgresql://server/math_textbooks
 │
 ├── Buffer: quantum.org
-│   ├── Python backend (PID 1235)
+│   ├── chiron-rs backend (PID 1235)
 │   └── Databases: postgresql://server/learning + postgresql://server/physics_textbooks
 ```
 
@@ -66,7 +66,6 @@ Use domain/textbook_name columns to separate instead of schemas.
 
 ```
 ~/learning/
-├── flake.nix              # Python environment
 ├── mathematics/
 │   ├── algebra.org
 │   ├── topology.org
@@ -93,17 +92,7 @@ cd ~/.emacs.d/my/feynman-chiron && nix build .#chiron-rs
 (require 'feynman-chiron)
 ```
 
-### 2. Create Python Environment
-
-```bash
-mkdir ~/learning
-cd ~/learning
-
-# Copy flake.nix from package
-cp /path/to/feynman-chiron-package/flake.nix .
-```
-
-### 3. Setup PostgreSQL Database
+### 2. Setup PostgreSQL Database
 
 On your PostgreSQL server:
 
@@ -116,22 +105,24 @@ CREATE EXTENSION vector;
 CREATE EXTENSION age;
 ```
 
-**Create schemas as needed:**
+**Create schemas as needed** — `chiron-ingest` was already installed by step 1's
+`nix build .#chiron-rs` (it builds both binaries), so no separate environment
+setup is needed here:
 
 ```bash
+mkdir ~/learning
 cd ~/learning
-nix develop
 
 # Create the learning schema (required)
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py create-schema \
+chiron-ingest create-schema \
   "$CHIRON_DATABASE_URL" learning
 
 # Create schemas for textbooks as you need them
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py create-schema \
+chiron-ingest create-schema \
   "$CHIRON_DATABASE_URL" math
 
 # Or create multiple at once
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py create-schema \
+chiron-ingest create-schema \
   "$CHIRON_DATABASE_URL" physics cs
 ```
 
@@ -143,7 +134,7 @@ CREATE SCHEMA learning;
 CREATE SCHEMA math;
 ```
 
-### 4. Setup direnv (Optional but Recommended)
+### 3. Setup direnv (Optional but Recommended)
 
 Copy the example and edit:
 
@@ -185,23 +176,22 @@ Add to `~/.emacs.d/init.el`:
 (setq-default feynman-chiron-database-url (getenv "CHIRON_DATABASE_URL"))
 ```
 
-### 5. Ingest Textbooks
+### 4. Ingest Textbooks
 
 ```bash
-cd ~/learning
-nix develop  # This loads CHIRON_DATABASE_URL from .envrc
+cd ~/learning  # direnv loads CHIRON_DATABASE_URL from .envrc here
 
 # Ingest math textbooks
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py ingest \
+chiron-ingest ingest \
   "$CHIRON_DATABASE_URL" --schema math \
   ~/textbooks/dummit-foote.pdf "dummit-foote"
 
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py ingest \
+chiron-ingest ingest \
   "$CHIRON_DATABASE_URL" --schema math \
   ~/textbooks/munkres.pdf "munkres"
 
 # Ingest physics textbooks
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py ingest \
+chiron-ingest ingest \
   "$CHIRON_DATABASE_URL" --schema physics \
   ~/textbooks/griffiths.pdf "griffiths"
 ```
@@ -210,19 +200,18 @@ python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py ingest \
 
 ```bash
 cd ~/learning
-nix develop
 
 # Ingest textbooks (uses ~/.pgpass for password)
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py ingest \
+chiron-ingest ingest \
   "postgresql://user@server/chiron" --schema math \
   ~/textbooks/dummit-foote.pdf "dummit-foote"
 
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py ingest \
+chiron-ingest ingest \
   "postgresql://user@server/chiron" --schema math \
   ~/textbooks/munkres.pdf "munkres"
 ```
 
-### 6. Create Learning Files
+### 5. Create Learning Files
 
 Example: `~/learning/mathematics/algebra.org`
 
@@ -273,20 +262,22 @@ I'm learning about wave functions.
 ### Starting a Learning Session
 
 ```bash
-# 1. Enter learning directory
+# 1. Enter learning directory (direnv sets CHIRON_DATABASE_URL, if configured)
 cd ~/learning
 
-# 2. Enter Python environment
-nix develop
-
-# 3. Open Emacs with learning file
+# 2. Open Emacs with learning file
 emacs mathematics/algebra.org
 
-# 4. In Emacs
+# 3. In Emacs
 M-x feynman-chiron-start
 # Write explanation
 # Press C-c C-c to submit
 ```
+
+No `nix develop`/environment-activation step is needed — the `chiron-rs`/
+`chiron-ingest` binaries are already installed (once, via step 1's
+`nix build .#chiron-rs` or Emacs's auto-install) and run directly as
+subprocesses.
 
 ### Working on Multiple Subjects
 
@@ -442,13 +433,13 @@ WHERE thread_id LIKE '%algebra%'
 Test semantic search:
 
 ```bash
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py search \
+chiron-ingest search \
   "$CHIRON_DATABASE_URL" --schema math \
   "dummit-foote" \
   "subgroup normal quotient"
 
 # With custom number of results
-python3 ~/.emacs.d/my/feynman-chiron/chiron_storage.py search \
+chiron-ingest search \
   "$CHIRON_DATABASE_URL" --schema math \
   "dummit-foote" "subgroup normal quotient" -k 5
 ```
@@ -519,7 +510,7 @@ M-x switch-to-buffer RET *feynman-backend* RET
 ```
 
 Common issues:
-- Python packages not installed (run `nix develop`)
+- `chiron-rs` binary not installed (`M-x feynman-chiron-install-backend`)
 - Database connection failed (check URL, credentials)
 - API key not set
 
@@ -584,13 +575,13 @@ Set in org file via file-local variables (or direnv for database URL). Backend a
 3. **Subject-based org files** - `~/learning/mathematics/algebra.org`
 4. **Base database URL** - Set once via direnv or .dir-locals.el
 5. **File-local variables** - Each file specifies only schema names
-6. **Nix environment** - `nix develop` provides Python packages
+6. **Rust binaries** - `chiron-rs`/`chiron-ingest`, installed once via
+   `M-x feynman-chiron-install-backend` (or `nix build .#chiron-rs`)
 
 **Daily use:**
 
 ```bash
 cd ~/learning
-nix develop
 emacs mathematics/algebra.org
 # M-x feynman-chiron-start
 # Learn!

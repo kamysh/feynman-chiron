@@ -1,10 +1,30 @@
 use anyhow::{Context, Result};
 use pgvector::Vector;
 use serde_json::Value;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{types::Json, Client, NoTls};
 use uuid::Uuid;
 
 const EMBEDDING_DIM: i32 = 384;
+
+/// Create SCHEMA_NAME on the server at ADMIN_DB_URL if it doesn't already
+/// exist. Uses a plain connection (no search_path scoping) since the schema
+/// being created can't yet be the target of an `options=-c search_path=...`
+/// connection param.
+pub async fn create_schema(admin_db_url: &str, schema_name: &str) -> Result<()> {
+    let (client, connection) = tokio_postgres::connect(admin_db_url, NoTls)
+        .await
+        .context("Failed to connect to PostgreSQL")?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("PostgreSQL connection error: {}", e);
+        }
+    });
+    client
+        .execute(&format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema_name), &[])
+        .await
+        .context("CREATE SCHEMA")?;
+    Ok(())
+}
 
 pub struct Storage {
     client: Client,
@@ -145,6 +165,27 @@ impl Storage {
 
     // ── RAG ──────────────────────────────────────────────────────────────────
 
+    pub async fn insert_chunk(
+        &self,
+        textbook_name: &str,
+        page_number: Option<i32>,
+        chunk_text: &str,
+        embedding: Vec<f32>,
+        metadata: &Value,
+    ) -> Result<()> {
+        let embedding = Vector::from(embedding);
+        self.client
+            .execute(
+                "INSERT INTO textbook_chunks
+                    (textbook_name, page_number, chunk_text, embedding, metadata)
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[&textbook_name, &page_number, &chunk_text, &embedding, &Json(metadata)],
+            )
+            .await
+            .context("insert_chunk")?;
+        Ok(())
+    }
+
     pub async fn search_textbook(
         &self,
         query_embedding: Vec<f32>,
@@ -240,13 +281,12 @@ impl Storage {
 
     pub async fn save_checkpoint(&self, thread_id: &str, state: &Value) -> Result<()> {
         let checkpoint_id = Uuid::new_v4().to_string();
-        let state_str = serde_json::to_string(state).context("serialize checkpoint")?;
         self.client
             .execute(
                 "INSERT INTO agent_checkpoints (thread_id, checkpoint_id, state)
-                 VALUES ($1, $2, $3::jsonb)
+                 VALUES ($1, $2, $3)
                  ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET state = EXCLUDED.state",
-                &[&thread_id, &checkpoint_id, &state_str],
+                &[&thread_id, &checkpoint_id, &Json(state)],
             )
             .await
             .context("save_checkpoint")?;
