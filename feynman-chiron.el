@@ -51,8 +51,11 @@ inside a function body called later (e.g. from `M-x').")
 
 (defcustom feynman-chiron-default-provider 'anthropic
   "Default API provider: openai or anthropic.
+`openai' speaks the OpenAI chat-completions wire format, so it also
+covers any OpenAI-compatible endpoint (DeepSeek, Together, OpenRouter,
+Groq, Mistral, Ollama, ...) when paired with `feynman-chiron-endpoint-url'.
 Can be overridden per-buffer with feynman-chiron-provider."
-  :type '(choice (const :tag "OpenAI" openai)
+  :type '(choice (const :tag "OpenAI-compatible (OpenAI, DeepSeek, Together, OpenRouter, Groq, ...)" openai)
                  (const :tag "Anthropic" anthropic))
   :group 'feynman-chiron)
 
