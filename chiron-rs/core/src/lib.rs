@@ -1,4 +1,5 @@
 pub mod embeddings;
+pub mod pgpass;
 pub mod storage;
 pub mod url;
 

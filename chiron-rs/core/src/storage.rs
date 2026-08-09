@@ -4,6 +4,8 @@ use serde_json::Value;
 use tokio_postgres::{types::Json, Client, NoTls};
 use uuid::Uuid;
 
+use crate::pgpass::resolve_config;
+
 const EMBEDDING_DIM: i32 = 384;
 
 /// Create SCHEMA_NAME on the server at ADMIN_DB_URL if it doesn't already
@@ -11,7 +13,8 @@ const EMBEDDING_DIM: i32 = 384;
 /// being created can't yet be the target of an `options=-c search_path=...`
 /// connection param.
 pub async fn create_schema(admin_db_url: &str, schema_name: &str) -> Result<()> {
-    let (client, connection) = tokio_postgres::connect(admin_db_url, NoTls)
+    let (client, connection) = resolve_config(admin_db_url)?
+        .connect(NoTls)
         .await
         .context("Failed to connect to PostgreSQL")?;
     tokio::spawn(async move {
@@ -32,7 +35,8 @@ pub struct Storage {
 
 impl Storage {
     pub async fn connect(db_url: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(db_url, NoTls)
+        let (client, connection) = resolve_config(db_url)?
+            .connect(NoTls)
             .await
             .context("Failed to connect to PostgreSQL")?;
 
@@ -59,13 +63,18 @@ impl Storage {
             )
             .await;
 
-        // Migrate embedding column if dimension changed
+        // Migrate embedding column if dimension changed. Resolve the table
+        // via to_regclass('textbook_chunks'), which respects search_path the
+        // same way the ALTER/CREATE TABLE statements below do — NOT a bare
+        // pg_class.relname scan, which matches a same-named table in ANY
+        // schema on the server and would let this "migration" (an
+        // unconditional DROP COLUMN) target a completely unrelated
+        // project's table just because it happens to share the name.
         let rows = self.client
             .query(
                 "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod)
                  FROM pg_attribute a
-                 JOIN pg_class c ON a.attrelid = c.oid
-                 WHERE c.relname = 'textbook_chunks'
+                 WHERE a.attrelid = to_regclass('textbook_chunks')
                    AND a.attname = 'embedding'
                    AND a.attnum > 0
                    AND NOT a.attisdropped",
