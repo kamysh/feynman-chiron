@@ -4,7 +4,7 @@
 
 ;; Author: Valentyn
 ;; Version: 2.0.0
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "27.1") (transient "0.3.0"))
 ;; Keywords: learning, education, ai
 ;; URL: https://github.com/kamysh/feynman-chiron
 
@@ -33,6 +33,7 @@
 
 (require 'json)
 (require 'lisp-mnt)
+(require 'transient)
 
 (defconst feynman-chiron--package-dir
   (file-name-directory
@@ -450,12 +451,45 @@ Returns t on success (exit 0), signals an error otherwise."
   (or database-url feynman-chiron-database-url
       (error "No database URL configured. Set feynman-chiron-database-url")))
 
+(defun feynman-chiron--run-ingest-lines (&rest args)
+  "Run chiron-ingest with ARGS, returning its stdout as a list of lines.
+Unlike `feynman-chiron--run-ingest', this is for quiet queries
+(list-schemas, list-textbooks): no buffer is shown, and a failure
+returns nil rather than signaling — callers use this to populate
+completion candidates and must degrade to free-text input when it's
+unavailable (binary missing, database unreachable, etc.), not treat
+that as fatal."
+  (let ((binary (feynman-chiron--find-binary "chiron-ingest")))
+    (when binary
+      (with-temp-buffer
+        (when (zerop (apply #'call-process binary nil t nil args))
+          (split-string (buffer-string) "\n" t))))))
+
+(defun feynman-chiron--read-schema (prompt database-url)
+  "Read a schema name with PROMPT, completing against DATABASE-URL's schemas.
+Falls back to plain `read-string' when the candidate list can't be
+fetched — never blocks on the database being reachable right now.
+Free text is always accepted; the returned schema need not already
+exist (e.g. `feynman-chiron-create-schema' names a new one)."
+  (let ((schemas (and database-url (feynman-chiron--run-ingest-lines "list-schemas" database-url))))
+    (completing-read prompt schemas nil nil)))
+
+(defun feynman-chiron--read-textbook-name (prompt database-url schema &optional require-match)
+  "Read a textbook name with PROMPT, completing against SCHEMA's textbooks.
+Same fallback behavior as `feynman-chiron--read-schema'. REQUIRE-MATCH
+non-nil restricts to an existing textbook (appropriate for search;
+ingest is naming a possibly-new one, so leave it nil there)."
+  (let ((names (and database-url schema
+                     (feynman-chiron--run-ingest-lines
+                      "list-textbooks" "--schema" schema database-url))))
+    (completing-read prompt names nil require-match)))
+
 ;;;###autoload
 (defun feynman-chiron-create-schema (database-url schema)
   "Create SCHEMA on DATABASE-URL via chiron-ingest."
   (interactive
-   (list (read-string "Database URL: " feynman-chiron-database-url)
-         (read-string "Schema name: ")))
+   (let ((db (read-string "Database URL: " feynman-chiron-database-url)))
+     (list db (feynman-chiron--read-schema "Schema name: " db))))
   (feynman-chiron--run-ingest "create-schema" database-url schema)
   (message "Schema '%s' created (or already exists)" schema))
 
@@ -469,12 +503,13 @@ MODEL is a Hugging Face Hub embedding model id, defaulting to
 own default. It only takes effect on SCHEMA's first ingest — see
 `feynman-chiron-embedding-model' for why."
   (interactive
-   (list (read-file-name "PDF file: " nil nil t)
-         (read-string "Textbook name: ")
-         (read-string "Schema: ")
-         nil
-         (read-string "Embedding model (empty for default): "
-                      nil nil feynman-chiron-embedding-model)))
+   (let* ((pdf (read-file-name "PDF file: " nil nil t))
+          (name (read-string "Textbook name: "))
+          (db (feynman-chiron--require-database-url nil))
+          (schema (feynman-chiron--read-schema "Schema: " db)))
+     (list pdf name schema nil
+           (read-string "Embedding model (empty for default): "
+                        nil nil feynman-chiron-embedding-model))))
   (let ((db-url (feynman-chiron--require-database-url database-url))
         (model (or (and model (not (string-empty-p model)) model)
                    feynman-chiron-embedding-model)))
@@ -490,9 +525,10 @@ own default. It only takes effect on SCHEMA's first ingest — see
 Uses `feynman-chiron-database-url' unless DATABASE-URL is given.
 Shows the top K (default 3) results in `feynman-chiron--ingest-buffer'."
   (interactive
-   (list (read-string "Textbook name: ")
-         (read-string "Query: ")
-         (read-string "Schema: ")))
+   (let* ((db (feynman-chiron--require-database-url nil))
+          (schema (feynman-chiron--read-schema "Schema: " db))
+          (name (feynman-chiron--read-textbook-name "Textbook name: " db schema t)))
+     (list name (read-string "Query: ") schema)))
   (let ((db-url (feynman-chiron--require-database-url database-url))
         (args (list "search" "--schema" schema)))
     (when k (setq args (append args (list "-k" (number-to-string k)))))
@@ -866,8 +902,29 @@ Then explain it in your own words.\n\n")
     (define-key map (kbd "C-c C-c") 'feynman-chiron-submit)
     (define-key map (kbd "C-c C-p") 'feynman-chiron-show-progress)
     (define-key map (kbd "C-c C-r") 'feynman-chiron-reset)
+    (define-key map (kbd "C-c C-m") 'feynman-chiron-menu)
     map)
   "Keymap for Feynman Chiron mode.")
+
+;;;###autoload (autoload 'feynman-chiron-menu "feynman-chiron" nil t)
+(transient-define-prefix feynman-chiron-menu ()
+  "Feynman Chiron command menu.
+The entry point for everything this package does — invoke this
+(`M-x feynman-chiron-menu', or `C-c C-m' inside a Feynman Chiron
+session buffer) instead of having to remember individual command
+names. Works from any buffer, not just a session buffer."
+  ["Feynman Chiron"
+   ["Session"
+    ("s" "Start/switch to session" feynman-chiron-start)
+    ("g" "Submit explanation" feynman-chiron-submit)
+    ("p" "Show progress" feynman-chiron-show-progress)
+    ("r" "Reset session" feynman-chiron-reset)]
+   ["Textbooks"
+    ("c" "Create schema" feynman-chiron-create-schema)
+    ("i" "Ingest textbook (PDF)" feynman-chiron-ingest-textbook)
+    ("t" "Search/test a textbook" feynman-chiron-search-textbook)]
+   ["Backend"
+    ("b" "Install/reinstall chiron-rs + chiron-ingest" feynman-chiron-install-backend)]])
 
 (define-derived-mode feynman-chiron-mode org-mode "Feynman-Chiron"
   "Major mode for learning with Feynman Chiron.

@@ -27,6 +27,33 @@ pub async fn create_schema(admin_db_url: &str, schema_name: &str) -> Result<()> 
     Ok(())
 }
 
+/// List user-created schemas on the server at ADMIN_DB_URL — the candidate
+/// set for completion prompts (Emacs shouldn't ask a user to type a schema
+/// name blind when the database can just say what exists). Excludes
+/// Postgres/extension-internal schemas that are never a project's schema.
+pub async fn list_schemas(admin_db_url: &str) -> Result<Vec<String>> {
+    let (client, connection) = resolve_config(admin_db_url)?
+        .connect(NoTls)
+        .await
+        .context("Failed to connect to PostgreSQL")?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("PostgreSQL connection error: {}", e);
+        }
+    });
+    let rows = client
+        .query(
+            "SELECT schema_name FROM information_schema.schemata
+             WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'ag_catalog', 'public')
+               AND schema_name NOT LIKE 'pg\\_%'
+             ORDER BY schema_name",
+            &[],
+        )
+        .await
+        .context("listing schemas")?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
 pub struct Storage {
     client: Client,
 }
@@ -280,6 +307,29 @@ impl Storage {
             chunk_text:    r.get("chunk_text"),
             similarity:    r.get("similarity"),
         }).collect())
+    }
+
+    /// List distinct textbook names already ingested into this schema — the
+    /// candidate set for a search/ingest prompt's completion, same reasoning
+    /// as `list_schemas`. Empty (not an error) if `textbook_chunks` doesn't
+    /// exist yet in this schema.
+    pub async fn list_textbook_names(&self) -> Result<Vec<String>> {
+        let exists: bool = self.client
+            .query_one("SELECT to_regclass('textbook_chunks') IS NOT NULL", &[])
+            .await
+            .context("checking for textbook_chunks table")?
+            .get(0);
+        if !exists {
+            return Ok(vec![]);
+        }
+        let rows = self.client
+            .query(
+                "SELECT DISTINCT textbook_name FROM textbook_chunks ORDER BY textbook_name",
+                &[],
+            )
+            .await
+            .context("listing textbook names")?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
     // ── Knowledge graph ───────────────────────────────────────────────────────

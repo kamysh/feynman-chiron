@@ -13,8 +13,13 @@ fn usage() -> &'static str {
 Usage:
   chiron-ingest --version
   chiron-ingest create-schema <db-url> <schema>...
+  chiron-ingest list-schemas <db-url>
+  chiron-ingest list-textbooks --schema <schema> <db-url>
   chiron-ingest ingest --schema <schema> [--model <hf-model-id>] <db-url> <pdf-path> <textbook-name>
   chiron-ingest search --schema <schema> [-k <n>] <db-url> <textbook-name> <query>
+
+list-schemas and list-textbooks print one name per line, with no other
+output — meant for a caller (e.g. Emacs completion) to parse, not to read.
 
 --model sets the embedding model for a schema the FIRST time it's ingested
 into (default: sentence-transformers/all-MiniLM-L6-v2). It's a one-time,
@@ -42,9 +47,11 @@ async fn run() -> Result<()> {
             println!("chiron-ingest {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Some("create-schema") => cmd_create_schema(&args[1..]).await,
-        Some("ingest")        => cmd_ingest(&args[1..]).await,
-        Some("search")        => cmd_search(&args[1..]).await,
+        Some("create-schema")  => cmd_create_schema(&args[1..]).await,
+        Some("list-schemas")   => cmd_list_schemas(&args[1..]).await,
+        Some("list-textbooks") => cmd_list_textbooks(&args[1..]).await,
+        Some("ingest")         => cmd_ingest(&args[1..]).await,
+        Some("search")         => cmd_search(&args[1..]).await,
         _ => {
             eprint!("{}", usage());
             bail!("unknown or missing command");
@@ -62,6 +69,45 @@ async fn cmd_create_schema(args: &[String]) -> Result<()> {
     for schema in &args[1..] {
         storage::create_schema(db_url, schema).await?;
         println!("✓ Schema '{}' created (or already exists)", schema);
+    }
+    Ok(())
+}
+
+// ── list-schemas / list-textbooks ───────────────────────────────────────────
+
+async fn cmd_list_schemas(args: &[String]) -> Result<()> {
+    if args.len() != 1 {
+        bail!("usage: chiron-ingest list-schemas <db-url>");
+    }
+    for schema in storage::list_schemas(&args[0]).await? {
+        println!("{}", schema);
+    }
+    Ok(())
+}
+
+async fn cmd_list_textbooks(args: &[String]) -> Result<()> {
+    let mut schema = None;
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--schema" | "-s" => {
+                i += 1;
+                schema = args.get(i).map(String::as_str);
+            }
+            other => positional.push(other),
+        }
+        i += 1;
+    }
+    let schema = schema.context("--schema/-s is required")?;
+    if positional.len() != 1 {
+        bail!("usage: chiron-ingest list-textbooks --schema <schema> <db-url>");
+    }
+    let db_url = with_schema(positional[0], schema);
+    let storage = Storage::connect(&db_url).await
+        .context("Failed to connect to database")?;
+    for name in storage.list_textbook_names().await? {
+        println!("{}", name);
     }
     Ok(())
 }

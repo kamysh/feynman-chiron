@@ -2,10 +2,17 @@
 
 Learn using the Feynman Technique with AI assistance. Explain concepts, get Socratic questions, track mastery in a knowledge graph.
 
+`M-x feynman-chiron-menu` is the entry point — a `transient` menu listing
+every command this package has, so you don't need to remember individual
+`M-x` names. Schema and textbook-name prompts complete against what's
+actually in the database (via `chiron-ingest list-schemas`/`list-textbooks`),
+not blind free text.
+
 ## Requirements
 
 - PostgreSQL with pgvector and Apache AGE extensions
 - Emacs with org-mode
+- `transient` (ships with Emacs 28+ / commonly already installed via magit)
 - API key: Anthropic or OpenAI (only for the agent — textbook ingestion embeds locally, no key needed)
 - Nix (for building the Rust binaries), unless installing prebuilt release binaries
 - Network access to huggingface.co the *first* time `chiron-rs` or `chiron-ingest`
@@ -275,12 +282,14 @@ Now each org file only needs to specify the schema and textbook sources.
 ```
 
 In Emacs:
+- `M-x feynman-chiron-menu` - Command menu (everything below, one entry point)
 - `M-x feynman-chiron-start` - Start session
 - `C-c C-c` - Submit explanation
 - `C-c C-p` - Show progress
-- `M-x feynman-chiron-create-schema` - Create a PostgreSQL schema
-- `M-x feynman-chiron-ingest-textbook` - Ingest a PDF textbook
-- `M-x feynman-chiron-search-textbook` - Test retrieval against an ingested textbook
+- `C-c C-m` - Command menu (inside a session buffer)
+- `M-x feynman-chiron-create-schema` - Create a PostgreSQL schema (schema-name prompt completes against what already exists)
+- `M-x feynman-chiron-ingest-textbook` - Ingest a PDF textbook (schema prompt completes against existing schemas)
+- `M-x feynman-chiron-search-textbook` - Test retrieval against an ingested textbook (schema and textbook-name prompts complete against what's actually in the database)
 - `M-x feynman-chiron-install-backend` - (Re)install the chiron-rs/chiron-ingest binaries
 
 ## Architecture
