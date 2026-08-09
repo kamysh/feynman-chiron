@@ -82,15 +82,17 @@ Use domain/textbook_name columns to separate instead of schemas.
 
 ### 1. Install Feynman Chiron
 
-```bash
-# Clone (or symlink) the package into your Emacs directory
-git clone git@github.com:kamysh/feynman-chiron.git ~/.emacs.d/my/feynman-chiron
-cd ~/.emacs.d/my/feynman-chiron && nix build .#chiron-rs
-
-# Add to ~/.emacs.d/init.el
-(add-to-list 'load-path "~/.emacs.d/my/feynman-chiron")
-(require 'feynman-chiron)
+```elisp
+;; ~/.emacs.d/init.el
+(use-package feynman-chiron
+  :vc (:url "https://github.com/kamysh/feynman-chiron" :branch "main"))
 ```
+
+See the [README](README.md#installation) for other install methods
+(`package-vc-install`, straight.el, elpaca). The `chiron-rs`/`chiron-ingest`
+binaries are installed by Emacs itself the first time you use a command that
+needs them (`M-x feynman-chiron-start`, `-install-backend`, etc.) — no
+`nix build` step required here.
 
 ### 2. Setup PostgreSQL Database
 
@@ -105,26 +107,10 @@ CREATE EXTENSION vector;
 CREATE EXTENSION age;
 ```
 
-**Create schemas as needed** — `chiron-ingest` was already installed by step 1's
-`nix build .#chiron-rs` (it builds both binaries), so no separate environment
-setup is needed here:
-
-```bash
-mkdir ~/learning
-cd ~/learning
-
-# Create the learning schema (required)
-chiron-ingest create-schema \
-  "$CHIRON_DATABASE_URL" learning
-
-# Create schemas for textbooks as you need them
-chiron-ingest create-schema \
-  "$CHIRON_DATABASE_URL" math
-
-# Or create multiple at once
-chiron-ingest create-schema \
-  "$CHIRON_DATABASE_URL" physics cs
-```
+**Create schemas as needed** with `M-x feynman-chiron-create-schema` (prompts
+for database URL and schema name) — once for `learning` (required), then once
+per textbook schema (`math`, `physics`, `cs`, ...). It shells out to
+`chiron-ingest` for you; there's no separate CLI step.
 
 **Or create schemas manually in PostgreSQL:**
 
@@ -178,38 +164,19 @@ Add to `~/.emacs.d/init.el`:
 
 ### 4. Ingest Textbooks
 
-```bash
-cd ~/learning  # direnv loads CHIRON_DATABASE_URL from .envrc here
+Use `M-x feynman-chiron-ingest-textbook` for each textbook — it prompts for
+the PDF path, textbook name, and schema, and defaults the database URL to
+`feynman-chiron-database-url` (from direnv/`.dir-locals.el`, or entered
+manually if unset):
 
-# Ingest math textbooks
-chiron-ingest ingest \
-  "$CHIRON_DATABASE_URL" --schema math \
-  ~/textbooks/dummit-foote.pdf "dummit-foote"
-
-chiron-ingest ingest \
-  "$CHIRON_DATABASE_URL" --schema math \
-  ~/textbooks/munkres.pdf "munkres"
-
-# Ingest physics textbooks
-chiron-ingest ingest \
-  "$CHIRON_DATABASE_URL" --schema physics \
-  ~/textbooks/griffiths.pdf "griffiths"
+```
+M-x feynman-chiron-ingest-textbook
+PDF file: ~/textbooks/dummit-foote.pdf
+Textbook name: dummit-foote
+Schema: math
 ```
 
-**Without direnv:**
-
-```bash
-cd ~/learning
-
-# Ingest textbooks (uses ~/.pgpass for password)
-chiron-ingest ingest \
-  "postgresql://user@server/chiron" --schema math \
-  ~/textbooks/dummit-foote.pdf "dummit-foote"
-
-chiron-ingest ingest \
-  "postgresql://user@server/chiron" --schema math \
-  ~/textbooks/munkres.pdf "munkres"
-```
+Repeat for `munkres` (schema `math`), `griffiths` (schema `physics`), etc.
 
 ### 5. Create Learning Files
 
@@ -430,18 +397,14 @@ WHERE thread_id LIKE '%algebra%'
 
 ### Textbook Search
 
-Test semantic search:
+Test semantic search with `M-x feynman-chiron-search-textbook` (prompts for
+textbook name, query, and schema; shows the top 3 results by default):
 
-```bash
-chiron-ingest search \
-  "$CHIRON_DATABASE_URL" --schema math \
-  "dummit-foote" \
-  "subgroup normal quotient"
-
-# With custom number of results
-chiron-ingest search \
-  "$CHIRON_DATABASE_URL" --schema math \
-  "dummit-foote" "subgroup normal quotient" -k 5
+```
+M-x feynman-chiron-search-textbook
+Textbook name: dummit-foote
+Query: subgroup normal quotient
+Schema: math
 ```
 
 ## Backup Strategy
@@ -576,7 +539,9 @@ Set in org file via file-local variables (or direnv for database URL). Backend a
 4. **Base database URL** - Set once via direnv or .dir-locals.el
 5. **File-local variables** - Each file specifies only schema names
 6. **Rust binaries** - `chiron-rs`/`chiron-ingest`, installed once via
-   `M-x feynman-chiron-install-backend` (or `nix build .#chiron-rs`)
+   `M-x feynman-chiron-install-backend` (or automatically the first time a
+   command that needs them is run) — always driven through Emacs, never
+   invoked by hand
 
 **Daily use:**
 

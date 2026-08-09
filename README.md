@@ -137,13 +137,11 @@ CREATE EXTENSION vector;
 CREATE EXTENSION age;
 ```
 
-**Create schemas (as needed)** — via Emacs, `M-x feynman-chiron-create-schema`, or the CLI directly:
+**Create schemas (as needed)** with `M-x feynman-chiron-create-schema`
+(prompts for the database URL and schema name; runs `chiron-ingest` under the
+hood — that binary is a subprocess of this package, not a tool you invoke
+yourself). Or manually:
 
-```bash
-chiron-ingest create-schema "postgresql://host/chiron" learning math
-```
-
-Or manually:
 ```sql
 CREATE SCHEMA learning;
 CREATE SCHEMA math;
@@ -151,17 +149,11 @@ CREATE SCHEMA math;
 
 ### 5. Ingest Textbooks (Optional)
 
-`M-x feynman-chiron-ingest-textbook` (prompts for PDF path, textbook name, schema),
-or the CLI directly:
-
-```bash
-chiron-ingest ingest --schema math "postgresql://host/chiron" ~/textbooks/book.pdf "book-name"
-```
+`M-x feynman-chiron-ingest-textbook` (prompts for PDF path, textbook name, schema).
 
 No API key needed — embeddings are generated locally (same MiniLM model
 `chiron-rs` uses at query time), so ingestion works fully offline aside from
-the database connection. Test retrieval with `M-x feynman-chiron-search-textbook`
-or `chiron-ingest search --schema math "postgresql://host/chiron" "book-name" "your query"`.
+the database connection. Test retrieval with `M-x feynman-chiron-search-textbook`.
 
 ## Configuration
 
@@ -256,9 +248,10 @@ Everything is Rust — no Python anywhere in this package.
   → probe/evaluate pipeline), speaks the same stdin/stdout JSON protocol the Emacs
   frontend expects. Talks to Anthropic natively or any OpenAI-compatible endpoint.
   See `docs/superpowers/specs/2026-06-01-chiron-rs-design.md` for the design.
-- **chiron-rs/ingest/** (binary `chiron-ingest`): offline textbook ingestion CLI
-  (PDF → chunks → pgvector embeddings) and schema creation — not part of the live
-  agent loop, invoked as its own subprocess.
+- **chiron-rs/ingest/** (binary `chiron-ingest`): offline textbook ingestion
+  (PDF → chunks → pgvector embeddings) and schema creation. Not part of the live
+  agent loop — invoked only as a subprocess of the `M-x feynman-chiron-create-schema`
+  / `-ingest-textbook` / `-search-textbook` Emacs commands, not run by hand.
 - **chiron-rs/core/** (library `chiron-core`): shared code between the two binaries
   — the MiniLM embedder (`candle`) and PostgreSQL/pgvector storage layer.
 - Per-buffer backend: each org file gets its own `chiron-rs` process
