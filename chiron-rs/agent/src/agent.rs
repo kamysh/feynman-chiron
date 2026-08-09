@@ -7,8 +7,8 @@ use chiron_core::Storage;
 
 use crate::{
     llm::chat,
+    textbook_registry::TextbookRegistry,
     types::{ChironState, Gap, Provider, Stage},
-    TextbookSource,
 };
 
 pub struct ProcessResult {
@@ -26,7 +26,7 @@ pub async fn process_explanation(
     textbook_sources: &[String],
     thread_id: &str,
     provider: &Provider,
-    textbook_pools: &HashMap<String, TextbookSource>,
+    textbook_registry: &mut TextbookRegistry,
     learning: &Storage,
     client: &Client,
 ) -> Result<ProcessResult> {
@@ -37,7 +37,7 @@ pub async fn process_explanation(
         thread_id.to_string(),
     );
 
-    let state = retrieve(state, textbook_pools).await;
+    let state = retrieve(state, textbook_registry).await;
     let state = analyze(state, provider, client).await;
 
     let state = match state.stage {
@@ -74,7 +74,7 @@ pub async fn process_explanation(
 
 async fn retrieve(
     mut state: ChironState,
-    pools: &HashMap<String, TextbookSource>,
+    textbook_registry: &mut TextbookRegistry,
 ) -> ChironState {
     if state.textbook_sources.is_empty() {
         state.stage = Stage::Analyze;
@@ -85,12 +85,15 @@ async fn retrieve(
     // Different textbook sources can be configured with different embedding
     // models (feynman-chiron-ingest-textbook's per-project --model), so the
     // query must be re-embedded in each source's own vector space — but
-    // sources sharing a model share the same Arc<Embedder> (build_textbook_pools),
+    // sources sharing a model share the same Arc<Embedder> (TextbookRegistry),
     // so cache by model_id to avoid repeating an identical forward pass for
     // each of them on every learner turn.
-    let mut embeddings_by_model: HashMap<&str, Vec<f32>> = HashMap::new();
+    let mut embeddings_by_model: HashMap<String, Vec<f32>> = HashMap::new();
     for source_name in &state.textbook_sources {
-        let Some((storage, embedder)) = pools.get(source_name) else {
+        // Resolves and caches the source now if it wasn't ready at agent
+        // startup (e.g. ingested moments after this process started), so a
+        // newly-ingested textbook becomes usable without restarting.
+        let Some((storage, embedder)) = textbook_registry.get(source_name).await else {
             eprintln!("No connection to textbook '{}'", source_name);
             continue;
         };
@@ -99,13 +102,13 @@ async fn retrieve(
         } else {
             match embedder.embed(&state.concept) {
                 Ok(v) => {
-                    embeddings_by_model.insert(embedder.model_id(), v.clone());
+                    embeddings_by_model.insert(embedder.model_id().to_string(), v.clone());
                     v
                 }
                 Err(e) => { eprintln!("Embedding failed for '{}': {}", source_name, e); continue; }
             }
         };
-        match storage.search_textbook(query_embedding, &[source_name.clone()], 2).await {
+        match storage.search_textbook(query_embedding, std::slice::from_ref(source_name), 2).await {
             Ok(chunks) => {
                 for chunk in chunks {
                     contexts.push(format!(

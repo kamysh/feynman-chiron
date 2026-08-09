@@ -97,7 +97,7 @@ fn default_thread() -> String {
 
 // ── stdout responses ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct Response {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
