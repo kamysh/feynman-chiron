@@ -5,11 +5,19 @@ mod types;
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use reqwest::Client;
 
 use chiron_core::{url::with_schema, Embedder, Storage};
+
+/// A connected textbook source: its schema-scoped Storage, and the
+/// Embedder matching the model that schema was actually ingested with
+/// (`Storage::get_embedding_config`) — never assumed. Arc'd because
+/// multiple sources commonly share one model and shouldn't each load
+/// their own copy of it.
+type TextbookSource = (Storage, Arc<Embedder>);
 
 use crate::{
     agent::process_explanation,
@@ -37,10 +45,6 @@ async fn run() -> Result<()> {
     // Build connection URLs with search_path
     let learning_url  = with_schema(&database_url, &learning_schema);
     let textbook_json = env::var("CHIRON_TEXTBOOK_SOURCES").unwrap_or_else(|_| "{}".into());
-
-    eprintln!("Loading embedding model…");
-    let embedder = Embedder::new().context("Failed to load embedding model")?;
-    eprintln!("Embedding model ready.");
 
     eprintln!("Connecting to learning database…");
     let learning = Storage::connect(&learning_url).await
@@ -76,7 +80,7 @@ async fn run() -> Result<()> {
         };
 
         let resp = handle_command(
-            &line, &provider, &textbook_pools, &embedder, &learning, &client
+            &line, &provider, &textbook_pools, &learning, &client
         ).await;
 
         if let Err(e) = writeln!(io::stdout(), "{}", serde_json::to_string(&resp)?) {
@@ -92,8 +96,7 @@ async fn run() -> Result<()> {
 async fn handle_command(
     line: &str,
     provider: &Provider,
-    textbook_pools: &HashMap<String, Storage>,
-    embedder: &Embedder,
+    textbook_pools: &HashMap<String, TextbookSource>,
     learning: &Storage,
     client: &Client,
 ) -> Response {
@@ -113,7 +116,7 @@ async fn handle_command(
         Command::Process { concept, explanation, textbook_sources, thread_id } => {
             match process_explanation(
                 &concept, &explanation, &textbook_sources, &thread_id,
-                provider, textbook_pools, embedder, learning, client,
+                provider, textbook_pools, learning, client,
             ).await {
                 Ok(result) => Response::success_with(
                     result.response,
@@ -169,13 +172,20 @@ fn build_provider() -> Result<Provider> {
 async fn build_textbook_pools(
     default_db_url: &str,
     json: &str,
-) -> HashMap<String, Storage> {
+) -> HashMap<String, TextbookSource> {
     let Ok(sources) = serde_json::from_str::<HashMap<String, serde_json::Value>>(json) else {
         eprintln!("Warning: could not parse CHIRON_TEXTBOOK_SOURCES JSON");
         return HashMap::new();
     };
 
     let mut pools = HashMap::new();
+    // Each project/schema was ingested with its own chosen embedding model
+    // (feynman-chiron-ingest-textbook's --model, persisted in that schema's
+    // embedding_config table) — load one Embedder per distinct model actually
+    // in use, not a single global one, and reuse it across sources that
+    // happen to share a model.
+    let mut embedders: HashMap<String, Arc<Embedder>> = HashMap::new();
+
     for (name, spec) in &sources {
         let (db_url, schema) = match spec {
             serde_json::Value::String(s) => (default_db_url.to_string(), s.clone()),
@@ -197,10 +207,44 @@ async fn build_textbook_pools(
             continue;
         }
         let url = with_schema(&db_url, &schema);
-        match Storage::connect(&url).await {
-            Ok(s)  => { pools.insert(name.clone(), s); }
-            Err(e) => eprintln!("Failed to connect to textbook '{}': {}", name, e),
-        }
+        let storage = match Storage::connect(&url).await {
+            Ok(s)  => s,
+            Err(e) => { eprintln!("Failed to connect to textbook '{}': {}", name, e); continue; }
+        };
+
+        let model = match storage.get_embedding_config().await {
+            Ok(Some((model, _dim))) => model,
+            Ok(None) => {
+                eprintln!(
+                    "Textbook '{}' (schema '{}') has no ingested content yet — skipping",
+                    name, schema
+                );
+                continue;
+            }
+            Err(e) => {
+                eprintln!("Failed to read embedding config for '{}': {}", name, e);
+                continue;
+            }
+        };
+
+        let embedder = if let Some(e) = embedders.get(&model) {
+            e.clone()
+        } else {
+            eprintln!("Loading embedding model '{}' for '{}'…", model, name);
+            match Embedder::new(&model) {
+                Ok(e) => {
+                    let e = Arc::new(e);
+                    embedders.insert(model.clone(), e.clone());
+                    e
+                }
+                Err(e) => {
+                    eprintln!("Failed to load embedding model '{}' for '{}': {}", model, name, e);
+                    continue;
+                }
+            }
+        };
+
+        pools.insert(name.clone(), (storage, embedder));
     }
     pools
 }

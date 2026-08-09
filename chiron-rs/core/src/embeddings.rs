@@ -5,21 +5,27 @@ use candle_transformers::models::bert::{BertModel, Config};
 use hf_hub::{split_id, HFClientSync};
 use tokenizers::Tokenizer;
 
-const MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
-const EMBEDDING_DIM: usize = 384;
+/// Default embedding model, used when a schema has no `embedding_config' yet
+/// (fresh `chiron-ingest create-schema`/`ingest`) and no model was requested.
+pub const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 
 pub struct Embedder {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
+    model_id: String,
+    dim: usize,
 }
 
 impl Embedder {
-    pub fn new() -> Result<Self> {
+    /// Load MODEL_ID (any BERT-family sentence-embedding model on Hugging
+    /// Face Hub compatible with `candle_transformers::models::bert`) from
+    /// the local `hf-hub` cache, downloading it first if not yet cached.
+    pub fn new(model_id: &str) -> Result<Self> {
         let device = Device::Cpu;
 
         let client = HFClientSync::new().context("Failed to create HuggingFace Hub client")?;
-        let (owner, name) = split_id(MODEL_ID);
+        let (owner, name) = split_id(model_id);
         let repo = client.model(owner, name);
 
         let config_path = repo.download_file().filename("config.json").send()
@@ -33,6 +39,7 @@ impl Embedder {
             std::fs::File::open(&config_path)
                 .context("Failed to open config.json")?
         ).context("Failed to parse config.json")?;
+        let dim = config.hidden_size;
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
@@ -45,10 +52,22 @@ impl Embedder {
         let model = BertModel::load(vb, &config)
             .context("Failed to load BERT model")?;
 
-        Ok(Self { model, tokenizer, device })
+        Ok(Self { model, tokenizer, device, model_id: model_id.to_string(), dim })
     }
 
-    /// Embed a text string, returning a 384-dimensional L2-normalised vector.
+    /// Hugging Face Hub id this embedder was loaded from, e.g.
+    /// "sentence-transformers/all-MiniLM-L6-v2".
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Output vector dimension, read from the model's own config
+    /// (`hidden_size`) rather than assumed.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Embed a text string, returning an L2-normalised vector of `self.dim()` dimensions.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let encoding = self.tokenizer
             .encode(text, true)
@@ -77,7 +96,7 @@ impl Embedder {
         let normalised = mean.broadcast_div(&norm)?.squeeze(0)?;     // [384]
 
         let vec = normalised.to_vec1::<f32>()?;
-        debug_assert_eq!(vec.len(), EMBEDDING_DIM);
+        debug_assert_eq!(vec.len(), self.dim);
         Ok(vec)
     }
 }
@@ -89,15 +108,16 @@ mod tests {
     #[test]
     #[ignore = "requires network + model download"]
     fn embed_returns_384_dims() {
-        let embedder = Embedder::new().unwrap();
+        let embedder = Embedder::new(DEFAULT_MODEL_ID).unwrap();
         let v = embedder.embed("Groups are a fundamental structure in algebra.").unwrap();
         assert_eq!(v.len(), 384);
+        assert_eq!(embedder.dim(), 384);
     }
 
     #[test]
     #[ignore = "requires network + model download"]
     fn embed_is_unit_normalised() {
-        let embedder = Embedder::new().unwrap();
+        let embedder = Embedder::new(DEFAULT_MODEL_ID).unwrap();
         let v = embedder.embed("Hello world").unwrap();
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-5, "norm was {}", norm);

@@ -193,6 +193,21 @@ Set via direnv (.envrc), .dir-locals.el, or file-local variables:
 This is the base database. Schemas are specified separately.
 Can be set once in ~/learning directory and shared across all org files.")
 
+(defvar-local feynman-chiron-embedding-model nil
+  "Embedding model for `feynman-chiron-ingest-textbook' on THIS project.
+A Hugging Face Hub model id, e.g. \"sentence-transformers/all-MiniLM-L6-v2\"
+(the default when nil) or \"BAAI/bge-small-en-v1.5\". Set via file-local
+variables or `.dir-locals.el', same as `feynman-chiron-textbook-sources':
+  # Local Variables:
+  # feynman-chiron-embedding-model: \"BAAI/bge-small-en-v1.5\"
+  # End:
+
+Only matters on a schema's FIRST ingest — chiron-ingest fixes the model a
+schema uses at that point and rejects a later ingest with a different one
+(`Storage::ensure_textbook_schema' in chiron-rs/core/src/storage.rs), so
+different projects/schemas can use different models, but a given schema
+cannot be switched between models in place.")
+
 (defvar-local feynman-chiron-learning-schema nil
   "PostgreSQL schema for learning state (graph, checkpoints, sessions).
 Set via file-local variables or .dir-locals.el:
@@ -398,16 +413,28 @@ Returns t on success (exit 0), signals an error otherwise."
   (message "Schema '%s' created (or already exists)" schema))
 
 ;;;###autoload
-(defun feynman-chiron-ingest-textbook (pdf-path textbook-name schema &optional database-url)
+(defun feynman-chiron-ingest-textbook (pdf-path textbook-name schema &optional database-url model)
   "Ingest PDF-PATH as TEXTBOOK-NAME into SCHEMA via chiron-ingest.
-Uses `feynman-chiron-database-url' unless DATABASE-URL is given."
+Uses `feynman-chiron-database-url' unless DATABASE-URL is given.
+
+MODEL is a Hugging Face Hub embedding model id, defaulting to
+`feynman-chiron-embedding-model'; leave it empty to use chiron-ingest's
+own default. It only takes effect on SCHEMA's first ingest — see
+`feynman-chiron-embedding-model' for why."
   (interactive
    (list (read-file-name "PDF file: " nil nil t)
          (read-string "Textbook name: ")
-         (read-string "Schema: ")))
-  (let ((db-url (feynman-chiron--require-database-url database-url)))
-    (feynman-chiron--run-ingest
-     "ingest" "--schema" schema db-url (expand-file-name pdf-path) textbook-name)
+         (read-string "Schema: ")
+         nil
+         (read-string "Embedding model (empty for default): "
+                      feynman-chiron-embedding-model)))
+  (let ((db-url (feynman-chiron--require-database-url database-url))
+        (model (or (and model (not (string-empty-p model)) model)
+                   feynman-chiron-embedding-model)))
+    (apply #'feynman-chiron--run-ingest
+           "ingest" "--schema" schema
+           (append (when model (list "--model" model))
+                   (list db-url (expand-file-name pdf-path) textbook-name)))
     (message "Ingested '%s' into schema '%s'" textbook-name schema)))
 
 ;;;###autoload

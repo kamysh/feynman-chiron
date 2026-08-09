@@ -6,8 +6,6 @@ use uuid::Uuid;
 
 use crate::pgpass::resolve_config;
 
-const EMBEDDING_DIM: i32 = 384;
-
 /// Create SCHEMA_NAME on the server at ADMIN_DB_URL if it doesn't already
 /// exist. Uses a plain connection (no search_path scoping) since the schema
 /// being created can't yet be the target of an `options=-c search_path=...`
@@ -63,79 +61,6 @@ impl Storage {
             )
             .await;
 
-        // Migrate embedding column if dimension changed. Resolve the table
-        // via to_regclass('textbook_chunks'), which respects search_path the
-        // same way the ALTER/CREATE TABLE statements below do — NOT a bare
-        // pg_class.relname scan, which matches a same-named table in ANY
-        // schema on the server and would let this "migration" (an
-        // unconditional DROP COLUMN) target a completely unrelated
-        // project's table just because it happens to share the name.
-        let rows = self.client
-            .query(
-                "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod)
-                 FROM pg_attribute a
-                 WHERE a.attrelid = to_regclass('textbook_chunks')
-                   AND a.attname = 'embedding'
-                   AND a.attnum > 0
-                   AND NOT a.attisdropped",
-                &[],
-            )
-            .await?;
-
-        if let Some(row) = rows.first() {
-            let typ: String = row.get(0);
-            if typ != format!("vector({})", EMBEDDING_DIM) {
-                eprintln!(
-                    "Migrating textbook_chunks.embedding {} → vector({}). Re-ingest textbooks.",
-                    typ, EMBEDDING_DIM
-                );
-                self.client
-                    .execute("DROP INDEX IF EXISTS textbook_chunks_embedding_idx", &[])
-                    .await?;
-                self.client
-                    .execute("ALTER TABLE textbook_chunks DROP COLUMN embedding", &[])
-                    .await?;
-                self.client
-                    .execute(
-                        &format!(
-                            "ALTER TABLE textbook_chunks ADD COLUMN embedding vector({})",
-                            EMBEDDING_DIM
-                        ),
-                        &[],
-                    )
-                    .await?;
-            }
-        }
-
-        self.client
-            .execute(
-                &format!(
-                    "CREATE TABLE IF NOT EXISTS textbook_chunks (
-                        id            SERIAL PRIMARY KEY,
-                        textbook_name TEXT NOT NULL,
-                        page_number   INTEGER,
-                        chunk_text    TEXT NOT NULL,
-                        embedding     vector({}),
-                        metadata      JSONB,
-                        created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )",
-                    EMBEDDING_DIM
-                ),
-                &[],
-            )
-            .await
-            .context("textbook_chunks table")?;
-
-        self.client
-            .execute(
-                "CREATE INDEX IF NOT EXISTS textbook_chunks_embedding_idx
-                 ON textbook_chunks USING ivfflat (embedding vector_cosine_ops)
-                 WITH (lists = 100)",
-                &[],
-            )
-            .await
-            .context("embedding index")?;
-
         self.client
             .execute(
                 "CREATE TABLE IF NOT EXISTS agent_checkpoints (
@@ -168,6 +93,113 @@ impl Storage {
             )
             .await
             .context("learning_sessions table")?;
+
+        Ok(())
+    }
+
+    /// Read this schema's embedding model configuration, if it has ever been
+    /// ingested into. Read-only — never creates the table or writes a row,
+    /// so it's safe to call from a retrieval/search path that must not
+    /// silently provision or mutate a project it's only querying.
+    pub async fn get_embedding_config(&self) -> Result<Option<(String, i32)>> {
+        let exists: bool = self.client
+            .query_one("SELECT to_regclass('embedding_config') IS NOT NULL", &[])
+            .await
+            .context("checking for embedding_config table")?
+            .get(0);
+        if !exists {
+            return Ok(None);
+        }
+        let rows = self.client
+            .query("SELECT model, dim FROM embedding_config", &[])
+            .await
+            .context("reading embedding_config")?;
+        Ok(rows.first().map(|r| (r.get("model"), r.get("dim"))))
+    }
+
+    /// Ensure this schema is set up to store textbook chunks embedded with
+    /// MODEL/DIM: create `embedding_config` + `textbook_chunks` fresh if
+    /// this schema has never been ingested into, or verify MODEL/DIM match
+    /// what it already used if it has.
+    ///
+    /// Deliberately does NOT auto-migrate on a mismatch (dropping and
+    /// recreating the embedding column, as this used to do, silently
+    /// discards every previously-ingested chunk's vector — a destructive
+    /// side effect of what should be a read/no-op decision). A mismatch is
+    /// a hard error instead: switching a project's embedding model means
+    /// re-ingesting, which the caller must do deliberately, into this
+    /// schema or a new one.
+    pub async fn ensure_textbook_schema(&self, model: &str, dim: i32) -> Result<()> {
+        self.client
+            .execute(
+                "CREATE TABLE IF NOT EXISTS embedding_config (
+                    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+                    model     TEXT NOT NULL,
+                    dim       INTEGER NOT NULL
+                )",
+                &[],
+            )
+            .await
+            .context("embedding_config table")?;
+
+        let existing = self.client
+            .query("SELECT model, dim FROM embedding_config", &[])
+            .await
+            .context("reading embedding_config")?;
+
+        match existing.first() {
+            None => {
+                self.client
+                    .execute(
+                        "INSERT INTO embedding_config (singleton, model, dim) VALUES (TRUE, $1, $2)",
+                        &[&model, &dim],
+                    )
+                    .await
+                    .context("embedding_config insert")?;
+            }
+            Some(row) => {
+                let existing_model: String = row.get("model");
+                let existing_dim: i32 = row.get("dim");
+                if existing_model != model || existing_dim != dim {
+                    anyhow::bail!(
+                        "this schema was already ingested with embedding model '{}' ({}-dim); \
+                         requested model '{}' ({}-dim) does not match. Switching a project's \
+                         embedding model in place is not supported — ingest into a different \
+                         schema instead.",
+                        existing_model, existing_dim, model, dim
+                    );
+                }
+            }
+        }
+
+        self.client
+            .execute(
+                &format!(
+                    "CREATE TABLE IF NOT EXISTS textbook_chunks (
+                        id            SERIAL PRIMARY KEY,
+                        textbook_name TEXT NOT NULL,
+                        page_number   INTEGER,
+                        chunk_text    TEXT NOT NULL,
+                        embedding     vector({}),
+                        metadata      JSONB,
+                        created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )",
+                    dim
+                ),
+                &[],
+            )
+            .await
+            .context("textbook_chunks table")?;
+
+        self.client
+            .execute(
+                "CREATE INDEX IF NOT EXISTS textbook_chunks_embedding_idx
+                 ON textbook_chunks USING ivfflat (embedding vector_cosine_ops)
+                 WITH (lists = 100)",
+                &[],
+            )
+            .await
+            .context("embedding index")?;
 
         Ok(())
     }

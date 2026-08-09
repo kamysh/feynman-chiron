@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use reqwest::Client;
@@ -9,6 +10,8 @@ use crate::{
     llm::chat,
     types::{ChironState, Gap, Provider, Stage},
 };
+
+type TextbookSource = (Storage, Arc<Embedder>);
 
 pub struct ProcessResult {
     pub response: String,
@@ -25,8 +28,7 @@ pub async fn process_explanation(
     textbook_sources: &[String],
     thread_id: &str,
     provider: &Provider,
-    textbook_pools: &HashMap<String, Storage>,
-    embedder: &Embedder,
+    textbook_pools: &HashMap<String, TextbookSource>,
     learning: &Storage,
     client: &Client,
 ) -> Result<ProcessResult> {
@@ -37,7 +39,7 @@ pub async fn process_explanation(
         thread_id.to_string(),
     );
 
-    let state = retrieve(state, textbook_pools, embedder).await;
+    let state = retrieve(state, textbook_pools).await;
     let state = analyze(state, provider, client).await;
 
     let state = match state.stage {
@@ -74,30 +76,28 @@ pub async fn process_explanation(
 
 async fn retrieve(
     mut state: ChironState,
-    pools: &HashMap<String, Storage>,
-    embedder: &Embedder,
+    pools: &HashMap<String, TextbookSource>,
 ) -> ChironState {
     if state.textbook_sources.is_empty() {
         state.stage = Stage::Analyze;
         return state;
     }
 
-    let query_embedding = match embedder.embed(&state.concept) {
-        Ok(v)  => v,
-        Err(e) => {
-            eprintln!("Embedding failed: {}", e);
-            state.stage = Stage::Analyze;
-            return state;
-        }
-    };
-
     let mut contexts = Vec::new();
     for source_name in &state.textbook_sources {
-        let Some(storage) = pools.get(source_name) else {
+        let Some((storage, embedder)) = pools.get(source_name) else {
             eprintln!("No connection to textbook '{}'", source_name);
             continue;
         };
-        match storage.search_textbook(query_embedding.clone(), &[source_name.clone()], 2).await {
+        // Embedded per-source, not once globally: different textbook
+        // sources can be configured with different embedding models
+        // (feynman-chiron-ingest-textbook's per-project --model), so the
+        // query must be re-embedded in each source's own vector space.
+        let query_embedding = match embedder.embed(&state.concept) {
+            Ok(v)  => v,
+            Err(e) => { eprintln!("Embedding failed for '{}': {}", source_name, e); continue; }
+        };
+        match storage.search_textbook(query_embedding, &[source_name.clone()], 2).await {
             Ok(chunks) => {
                 for chunk in chunks {
                     contexts.push(format!(

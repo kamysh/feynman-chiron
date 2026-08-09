@@ -2,7 +2,7 @@ use std::env;
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
-use chiron_core::{storage, url::with_schema, Embedder, Storage};
+use chiron_core::{embeddings::DEFAULT_MODEL_ID, storage, url::with_schema, Embedder, Storage};
 
 const CHUNK_SIZE: usize = 1500;
 const CHUNK_OVERLAP: usize = 300;
@@ -12,8 +12,14 @@ fn usage() -> &'static str {
 
 Usage:
   chiron-ingest create-schema <db-url> <schema>...
-  chiron-ingest ingest --schema <schema> <db-url> <pdf-path> <textbook-name>
+  chiron-ingest ingest --schema <schema> [--model <hf-model-id>] <db-url> <pdf-path> <textbook-name>
   chiron-ingest search --schema <schema> [-k <n>] <db-url> <textbook-name> <query>
+
+--model sets the embedding model for a schema the FIRST time it's ingested
+into (default: sentence-transformers/all-MiniLM-L6-v2). It's a one-time,
+per-schema choice: once a schema has ingested content, later `ingest` calls
+must match that model, and `search` always uses it automatically — there is
+no --model flag for search.
 "
 }
 
@@ -59,6 +65,7 @@ async fn cmd_create_schema(args: &[String]) -> Result<()> {
 
 struct IngestArgs<'a> {
     schema: &'a str,
+    model: &'a str,
     db_url: &'a str,
     pdf_path: &'a str,
     textbook_name: &'a str,
@@ -66,6 +73,7 @@ struct IngestArgs<'a> {
 
 fn parse_ingest_args(args: &[String]) -> Result<IngestArgs<'_>> {
     let mut schema = None;
+    let mut model = DEFAULT_MODEL_ID;
     let mut positional = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -74,16 +82,21 @@ fn parse_ingest_args(args: &[String]) -> Result<IngestArgs<'_>> {
                 i += 1;
                 schema = args.get(i).map(String::as_str);
             }
+            "--model" | "-m" => {
+                i += 1;
+                model = args.get(i).map(String::as_str).context("--model/-m requires a value")?;
+            }
             other => positional.push(other),
         }
         i += 1;
     }
     let schema = schema.context("--schema/-s is required")?;
     if positional.len() != 3 {
-        bail!("usage: chiron-ingest ingest --schema <schema> <db-url> <pdf-path> <textbook-name>");
+        bail!("usage: chiron-ingest ingest --schema <schema> [--model <hf-model-id>] <db-url> <pdf-path> <textbook-name>");
     }
     Ok(IngestArgs {
         schema,
+        model,
         db_url: positional[0],
         pdf_path: positional[1],
         textbook_name: positional[2],
@@ -107,13 +120,15 @@ async fn cmd_ingest(args: &[String]) -> Result<()> {
     }
     println!("✓ Created {} chunks", chunks.len());
 
-    println!("Loading embedding model…");
-    let embedder = Embedder::new().context("Failed to load embedding model")?;
+    println!("Loading embedding model '{}'…", a.model);
+    let embedder = Embedder::new(a.model).context("Failed to load embedding model")?;
 
     let db_url = with_schema(a.db_url, a.schema);
     println!("Connecting to database (schema '{}')...", a.schema);
     let storage = Storage::connect(&db_url).await
         .context("Failed to connect to database")?;
+    storage.ensure_textbook_schema(embedder.model_id(), embedder.dim() as i32).await
+        .context("Failed to set up embedding schema")?;
 
     println!("Generating embeddings and storing...");
     for (page_number, chunk_text) in &chunks {
@@ -196,12 +211,19 @@ struct SearchArgs<'a> {
 async fn cmd_search(args: &[String]) -> Result<()> {
     let a = parse_search_args(args)?;
 
-    let embedder = Embedder::new().context("Failed to load embedding model")?;
-    let query_embedding = embedder.embed(a.query)?;
-
     let db_url = with_schema(a.db_url, a.schema);
     let storage = Storage::connect(&db_url).await
         .context("Failed to connect to database")?;
+
+    let (model, _dim) = storage.get_embedding_config().await
+        .context("Failed to read embedding config")?
+        .with_context(|| format!(
+            "schema '{}' has no ingested textbooks yet — run `feynman-chiron-ingest-textbook` first",
+            a.schema
+        ))?;
+    println!("Loading embedding model '{}'…", model);
+    let embedder = Embedder::new(&model).context("Failed to load embedding model")?;
+    let query_embedding = embedder.embed(a.query)?;
 
     let results = storage
         .search_textbook(query_embedding, &[a.textbook_name.to_string()], a.k)

@@ -8,6 +8,8 @@ Learn using the Feynman Technique with AI assistance. Explain concepts, get Socr
 - Emacs with org-mode
 - API key: Anthropic or OpenAI (only for the agent — textbook ingestion embeds locally, no key needed)
 - Nix (for building the Rust binaries), unless installing prebuilt release binaries
+- Network access to huggingface.co the *first* time `chiron-rs` or `chiron-ingest`
+  runs (see [Embedding model](#embedding-model) below) — not needed after that
 
 ## Installation
 
@@ -152,8 +154,36 @@ CREATE SCHEMA math;
 `M-x feynman-chiron-ingest-textbook` (prompts for PDF path, textbook name, schema).
 
 No API key needed — embeddings are generated locally (same MiniLM model
-`chiron-rs` uses at query time), so ingestion works fully offline aside from
-the database connection. Test retrieval with `M-x feynman-chiron-search-textbook`.
+`chiron-rs` uses at query time). See [Embedding model](#embedding-model) below:
+the *first* run of either binary needs network access to fetch the model, after
+which ingestion needs only the database connection.
+
+## Embedding model
+
+`chiron-rs` and `chiron-ingest` embed text locally via `candle` — no API
+calls, no API key — using any BERT-family sentence-embedding model on
+Hugging Face Hub. The **default** is
+[`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
+(384-dim), but the model is a **per-project setting**, not a fixed constant:
+set `feynman-chiron-embedding-model` (buffer-local, file-local-variable) or
+pass a model explicitly to `M-x feynman-chiron-ingest-textbook`. A schema's
+embedding model is fixed on its *first* ingest and persisted server-side
+(`embedding_config` table) — later ingests into the same schema with a
+*different* model are rejected with a clear error rather than silently
+migrated, since a migration would mean discarding every previously-embedded
+chunk's vector. To switch a project's model, ingest into a new (or emptied)
+schema instead. `M-x feynman-chiron-search-textbook` always reads back
+whichever model a schema actually used, so query and stored vectors can
+never mismatch — there's no model flag for search.
+
+Loading a model (`Embedder::new`, `chiron-rs/core/src/embeddings.rs`) fetches
+`config.json`, `tokenizer.json`, and `model.safetensors` from Hugging Face
+Hub through the `hf-hub` crate the first time that specific model is used,
+caching them under `hf-hub`'s default location (`~/.cache/huggingface/hub`
+on Linux/macOS, `HF_HOME` if set). That first load per model needs network
+access to huggingface.co; every run after that is served from the local
+cache with no network needed. There is currently no way to pre-seed or
+relocate this cache from Emacs — it's whatever `hf-hub` does by default.
 
 ## Configuration
 
@@ -180,6 +210,7 @@ given learning session talks to:
 | `feynman-chiron-database-url` | PostgreSQL connection string, e.g. `"postgresql://host/chiron"` |
 | `feynman-chiron-learning-schema` | Schema name for this session's progress/mastery tracking |
 | `feynman-chiron-textbook-sources` | Alist of `(name . schema)` or `(name . (database-url . schema))` for RAG retrieval — see the "Advanced" example below |
+| `feynman-chiron-embedding-model` | Hugging Face Hub model id for `feynman-chiron-ingest-textbook` on this project (default when nil: `sentence-transformers/all-MiniLM-L6-v2`). Only takes effect on a schema's first ingest — see [Embedding model](#embedding-model) above |
 | `feynman-chiron-provider` | Per-buffer override of `feynman-chiron-default-provider` |
 | `feynman-chiron-model` | Per-buffer override of the provider's default model |
 

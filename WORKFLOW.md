@@ -165,16 +165,24 @@ Add to `~/.emacs.d/init.el`:
 ### 4. Ingest Textbooks
 
 Use `M-x feynman-chiron-ingest-textbook` for each textbook — it prompts for
-the PDF path, textbook name, and schema, and defaults the database URL to
-`feynman-chiron-database-url` (from direnv/`.dir-locals.el`, or entered
-manually if unset):
+the PDF path, textbook name, schema, and embedding model, and defaults the
+database URL to `feynman-chiron-database-url` (from direnv/`.dir-locals.el`,
+or entered manually if unset):
 
 ```
 M-x feynman-chiron-ingest-textbook
 PDF file: ~/textbooks/dummit-foote.pdf
 Textbook name: dummit-foote
 Schema: math
+Embedding model (empty for default):
 ```
+
+Leave the model prompt empty to use the default
+(`sentence-transformers/all-MiniLM-L6-v2`), or set
+`feynman-chiron-embedding-model` (file-local, per project) to pick a
+different one — see [README: Embedding model](README.md#embedding-model). It
+only matters on a schema's *first* ingest; a schema can't be switched to a
+different model afterward, only re-ingested into a new one.
 
 Repeat for `munkres` (schema `math`), `griffiths` (schema `physics`), etc.
 
