@@ -177,13 +177,17 @@ If nil, looks for \\='chiron-rs\\=' on PATH and in the package directory."
   :group 'feynman-chiron)
 
 (defcustom feynman-chiron-endpoint-url nil
-  "Base URL for OpenAI-compatible LLM endpoint.
-Required when CHIRON_PROVIDER is \\='openai-compat\\=' (Groq, Mistral, Ollama, etc.).
-Examples:
+  "Base URL override for the configured LLM provider.
+For provider \\='openai\\=' (OpenAI-compatible wire format), overrides the
+default https://api.openai.com — use for Groq, Mistral, Ollama, or any
+other OpenAI-compatible endpoint. Examples:
   Groq:   https://api.groq.com/openai
   Ollama: http://localhost:11434/v1
-If nil, defaults to https://api.openai.com when provider is \\='openai\\='."
-  :type '(choice (const :tag "Default (OpenAI)" nil)
+For provider \\='anthropic\\=', overrides the default
+https://api.anthropic.com — use for a local Anthropic-API-compatible
+proxy such as Meridian, e.g. http://localhost:3456.
+If nil, each provider uses its own real API endpoint."
+  :type '(choice (const :tag "Default" nil)
                  (string :tag "Endpoint URL"))
   :group 'feynman-chiron)
 

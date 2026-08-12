@@ -157,7 +157,11 @@ fn build_provider() -> Result<Provider> {
         .context("No API key: set CHIRON_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY")?;
 
     match provider_str.as_str() {
-        "anthropic" => Ok(Provider::Anthropic { api_key, model }),
+        "anthropic" => {
+            let base_url = env::var("CHIRON_ENDPOINT_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com".into());
+            Ok(Provider::Anthropic { api_key, model, base_url })
+        }
         _ => {
             // "openai", "openai-compat", "groq", or any other value
             let base_url = env::var("CHIRON_ENDPOINT_URL")

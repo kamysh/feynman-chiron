@@ -8,9 +8,10 @@ use crate::types::Provider;
 /// Returns the assistant's text response.
 pub async fn chat(client: &Client, provider: &Provider, system: &str, user: &str) -> Result<String> {
     match provider {
-        Provider::Anthropic { api_key, model } => {
+        Provider::Anthropic { api_key, model, base_url } => {
+            let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
             let resp: Value = client
-                .post("https://api.anthropic.com/v1/messages")
+                .post(&url)
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
@@ -91,6 +92,7 @@ mod tests {
         let anth = Provider::Anthropic {
             api_key: "k".into(),
             model: "claude-sonnet-4-6".into(),
+            base_url: "https://api.anthropic.com".into(),
         };
         assert_eq!(provider_name(&anth), "anthropic");
         assert_eq!(model_name(&anth), "claude-sonnet-4-6");

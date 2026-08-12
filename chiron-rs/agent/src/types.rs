@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum Provider {
-    Anthropic { api_key: String, model: String },
+    Anthropic { api_key: String, model: String, base_url: String },
     OpenAICompat { base_url: String, api_key: String, model: String },
 }
 
