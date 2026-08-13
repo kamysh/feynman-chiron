@@ -12,6 +12,7 @@ pub enum Stage {
     Initial,
     Analyze,
     Probe,
+    Synthesize,
     Evaluate,
     Complete,
 }
@@ -19,11 +20,12 @@ pub enum Stage {
 impl Stage {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Stage::Initial  => "initial",
-            Stage::Analyze  => "analyze",
-            Stage::Probe    => "probe",
-            Stage::Evaluate => "evaluate",
-            Stage::Complete => "complete",
+            Stage::Initial    => "initial",
+            Stage::Analyze    => "analyze",
+            Stage::Probe      => "probe",
+            Stage::Synthesize => "synthesize",
+            Stage::Evaluate   => "evaluate",
+            Stage::Complete   => "complete",
         }
     }
 }
@@ -47,6 +49,21 @@ pub struct ChironState {
     pub thread_id: String,
     pub textbook_sources: Vec<String>,
     pub response_message: Option<String>,
+    /// How many `Chiron:` turns are already in the transcript, derived by
+    /// `count_chiron_turns` from the incoming `explanation` text itself —
+    /// not persisted separately. The transcript is unstripped now (see
+    /// feynman-chiron.el's `--insert-response`/`--subtree-explanation`), so
+    /// it's the single source of truth for round count; used to force a
+    /// `Synthesize` turn instead of probing forever.
+    pub probe_rounds: u32,
+    /// One or more separate `Chiron:` turns for THIS response. Almost
+    /// always a single element (synthesize/evaluate give one cohesive
+    /// answer) — `probe` is the exception: it splits its questions into
+    /// individual turns so feynman-chiron.el can give each one its own
+    /// `You:` reply slot instead of bunching a `You:` prompt after all of
+    /// them. `response_message` still holds a plain-text fallback (all
+    /// turns joined) for any caller that only reads the single string.
+    pub turns: Vec<String>,
 }
 
 impl ChironState {
@@ -66,6 +83,8 @@ impl ChironState {
             thread_id,
             textbook_sources,
             response_message: None,
+            probe_rounds: 0,
+            turns: vec![],
         }
     }
 }
@@ -102,6 +121,11 @@ pub struct Response {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<String>,
+    /// The response split into individual `Chiron:` turns — see
+    /// `ChironState::turns`. feynman-chiron.el inserts one `Chiron:`/`You:`
+    /// pair per element instead of one big block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,10 +152,11 @@ pub struct StateSnapshot {
 }
 
 impl Response {
-    pub fn success_with(response: String, state: StateSnapshot) -> Self {
+    pub fn success_with(response: String, turns: Vec<String>, state: StateSnapshot) -> Self {
         Self {
             success: true,
             response: Some(response),
+            turns: Some(turns),
             state: Some(state),
             error: None,
             mastered_concepts: None,
@@ -147,6 +172,7 @@ impl Response {
             success: true,
             mastered_concepts: Some(concepts),
             response: None,
+            turns: None,
             state: None,
             error: None,
             provider: None,
@@ -164,6 +190,7 @@ impl Response {
             database: Some(database),
             learning_schema: Some(learning_schema),
             response: None,
+            turns: None,
             state: None,
             error: None,
             mastered_concepts: None,
@@ -175,6 +202,7 @@ impl Response {
             success: false,
             error: Some(msg.into()),
             response: None,
+            turns: None,
             state: None,
             mastered_concepts: None,
             provider: None,

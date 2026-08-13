@@ -118,6 +118,7 @@ async fn handle_command(
             ).await {
                 Ok(result) => Response::success_with(
                     result.response,
+                    result.turns,
                     types::StateSnapshot {
                         concept:           result.concept,
                         explanations:      result.explanations,

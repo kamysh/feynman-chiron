@@ -206,8 +206,9 @@ Global settings (`M-x customize-group RET feynman-chiron RET`, or `setq`):
 | `feynman-chiron-anthropic-key` | `nil` | Anthropic API key: string, zero-arg function, or `nil` to fall back to `auth-source` (host `api.anthropic.com`) |
 | `feynman-chiron-backend-program` | `nil` | Path to the `chiron-rs` binary; `nil` auto-detects via `PATH`, then `chiron-rs/target/release/chiron-rs` next to the package, then `feynman-chiron-backend-install-dir`, then downloads it automatically |
 | `feynman-chiron-backend-install-dir` | `bin/` inside the package checkout | Where the prebuilt binary is downloaded to (deliberately outside your shell `PATH` — the binary has no standalone use) |
-| `feynman-chiron-endpoint-url` | `nil` | Base URL for an OpenAI-compatible endpoint (Groq, Mistral, Ollama, …) when provider is `openai`; defaults to `https://api.openai.com` |
+| `feynman-chiron-endpoint-url` | `nil` | Base URL override for whichever provider is active — an OpenAI-compatible endpoint (Groq, Mistral, Ollama, …) when provider is `openai`, or a local Anthropic-API-compatible proxy (e.g. Meridian) when provider is `anthropic`; `nil` uses each provider's own real API endpoint |
 | `feynman-chiron-backend-buffer` | `" *feynman-backend*"` | Name of the buffer holding the backend process's stderr/stdout |
+| `feynman-chiron-response-timeout` | `60` | Seconds to wait for a response from the agent. A real LLM call — especially through a CLI-proxying endpoint that spawns a subprocess per request — can take well over 10s |
 
 Per-buffer settings, set via file-local variables (see the `algebra.org` example
 below) or `.dir-locals.el` — these have no global default and configure what a
@@ -227,6 +228,11 @@ given learning session talks to:
 
 ## Usage
 
+`feynman-chiron-mode` is a minor mode on top of `org-mode` — there is no
+separate session buffer, and nothing is ever locked read-only. One org
+heading is one concept; its subtree is your explanation, written and
+revised exactly like any other org text.
+
 Create a learning file `algebra.org`:
 
 ```org
@@ -236,9 +242,9 @@ Create a learning file `algebra.org`:
 
 * Groups
 
-I'm learning about groups in abstract algebra.
-
-[Write your explanation here]
+I'm learning about groups in abstract algebra — a group is a set with
+a binary operation satisfying closure, associativity, identity, and
+inverses.
 
 
 # Local Variables:
@@ -247,6 +253,38 @@ I'm learning about groups in abstract algebra.
 # feynman-chiron-textbook-sources: (("book-name" . "math"))
 # End:
 ```
+
+Put point under the `* Groups` heading and press `C-c C-c`
+(`feynman-chiron-submit`). This sends the heading text as the concept
+and the current subtree text as the conversation so far, and appends
+Chiron's response as a `Chiron: ` turn, followed by a `You: ` prompt
+for your reply:
+
+```org
+* Groups
+:PROPERTIES:
+:ID:       3f9e2c1a-...
+:END:
+
+I'm learning about groups in abstract algebra — a group is a set with
+a binary operation satisfying closure, associativity, identity, and
+inverses.
+
+Chiron: Good start. One gap: you haven't said why the operation needs
+to be well-defined on the set (closure) rather than just "some
+operation" — can you give an example of a set + operation that fails
+closure?
+
+You:
+```
+
+Write your reply after `You: ` (that's where point lands after each
+response) and press `C-c C-c` again to continue. Each submit sends the
+*whole* transcript, never stripped or truncated — Chiron sees its own
+prior turns as context, so it won't repeat a question you already
+answered. The heading's `:ID:` property (created automatically on
+first submit, via `org-id`) is the stable identifier your progress is
+tracked under — renaming or moving the heading doesn't lose it.
 
 **Tip:** Set `feynman-chiron-database-url` once in `~/.emacs.d/init.el` or via direnv:
 
@@ -271,10 +309,9 @@ Now each org file only needs to specify the schema and textbook sources.
 
 In Emacs:
 - `M-x feynman-chiron-menu` - Command menu (everything below, one entry point)
-- `M-x feynman-chiron-start` - Start session
-- `C-c C-c` - Submit explanation
-- `C-c C-p` - Show progress
-- `C-c C-m` - Command menu (inside a session buffer)
+- `M-x feynman-chiron-start` - Enable `feynman-chiron-mode` in the current org buffer and ready the backend
+- `C-c C-c` - Submit the org subtree at point (`feynman-chiron-submit`)
+- `C-c C-m` - Command menu (with `feynman-chiron-mode` enabled)
 - `M-x feynman-chiron-create-schema` - Create a PostgreSQL schema (schema-name prompt completes against what already exists)
 - `M-x feynman-chiron-ingest-textbook` - Ingest a PDF textbook (schema prompt completes against existing schemas)
 - `M-x feynman-chiron-search-textbook` - Test retrieval against an ingested textbook (schema and textbook-name prompts complete against what's actually in the database)

@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025
 
 ;; Author: Valentyn
-;; Version: 2.0.2
+;; Version: 2.1.0
 ;; Package-Requires: ((emacs "27.1") (transient "0.3.0"))
 ;; Keywords: learning, education, ai
 ;; URL: https://github.com/kamysh/feynman-chiron
@@ -21,12 +21,16 @@
 ;; tracking.  See README.md for installation and configuration.
 ;;
 ;; Usage:
-;;   M-x feynman-chiron-start
+;;   M-x feynman-chiron-start   (enables `feynman-chiron-mode' here)
 ;;
-;; In the buffer:
-;;   - Type after the > prompt
-;;   - C-c C-c to submit
-;;   - Chiron responds, buffer becomes read-only except next prompt
+;; Write your explanation freely under an org heading — the heading is
+;; the concept, its subtree is your explanation, and nothing is ever
+;; locked read-only: revise it in place like any other org text.
+;;   - C-c C-c to submit the current subtree
+;;   - Chiron's response is inserted as a `Chiron: ' turn, followed by a
+;;     `You: ' prompt for your reply
+;;   - Each submit sends the WHOLE transcript so far (never stripped or
+;;     truncated) — write your reply after `You: ' and press C-c C-c
 ;;
 
 ;;; Code:
@@ -34,8 +38,9 @@
 (require 'json)
 (require 'lisp-mnt)
 (require 'transient)
-
-(declare-function org-indent-mode "org-indent" (&optional arg))
+(require 'org)
+(require 'org-id)
+(require 'org-element)
 
 (defconst feynman-chiron--package-dir
   (file-name-directory
@@ -70,6 +75,8 @@ Set via file-local variables:
   # Local Variables:
   # feynman-chiron-provider: openai
   # End:")
+(put 'feynman-chiron-provider 'safe-local-variable
+     (lambda (v) (memq v '(nil openai anthropic))))
 
 (defcustom feynman-chiron-openai-model "gpt-4"
   "Default OpenAI model."
@@ -88,6 +95,7 @@ Set via file-local variables:
   # Local Variables:
   # feynman-chiron-model: \"gpt-4-turbo\"
   # End:")
+(put 'feynman-chiron-model 'safe-local-variable #'stringp)
 
 ;;; API keys
 
@@ -134,23 +142,8 @@ Falls back to an `auth-source' lookup on HOST when KEY is nil."
 
 ;;; Internal variables
 
-(defvar feynman-chiron-buffer-name "*Feynman Chiron*"
-  "Name of the Chiron learning buffer.")
-
 (defvar-local feynman-chiron-backend-process nil
-  "Python backend process for this buffer.")
-
-(defvar-local feynman-chiron-state nil
-  "Current learning state for this buffer.
-Plist containing:
-  :concept - current concept being learned
-  :stage - current stage (initial, explain, probe, refine, complete)
-  :explanations - list of student explanations
-  :gaps - identified gaps
-  :mastered - alist of (concept . data)")
-
-(defvar-local feynman-chiron-prompt-marker nil
-  "Marker for start of current prompt in this buffer.")
+  "Chiron agent backend process for this buffer.")
 
 ;;; API Communication
 
@@ -200,6 +193,7 @@ Set via direnv (.envrc), .dir-locals.el, or file-local variables:
 
 This is the base database. Schemas are specified separately.
 Can be set once in ~/learning directory and shared across all org files.")
+(put 'feynman-chiron-database-url 'safe-local-variable #'stringp)
 
 (defvar-local feynman-chiron-embedding-model nil
   "Embedding model for `feynman-chiron-ingest-textbook' on THIS project.
@@ -215,6 +209,7 @@ schema uses at that point and rejects a later ingest with a different one
 (`Storage::ensure_textbook_schema' in chiron-rs/core/src/storage.rs), so
 different projects/schemas can use different models, but a given schema
 cannot be switched between models in place.")
+(put 'feynman-chiron-embedding-model 'safe-local-variable #'stringp)
 
 (defvar-local feynman-chiron-learning-schema nil
   "PostgreSQL schema for learning state (graph, checkpoints, sessions).
@@ -227,6 +222,7 @@ This schema stores:
 - Knowledge graph (concepts, mastery, relationships)
 - Agent checkpoints
 - Learning session history")
+(put 'feynman-chiron-learning-schema 'safe-local-variable #'stringp)
 
 (defvar-local feynman-chiron-textbook-sources nil
   "Alist of textbook sources for RAG.
@@ -248,6 +244,22 @@ Set via file-local variables:
   # End:
 
 The agent queries all specified sources.")
+(defun feynman-chiron--safe-textbook-sources-p (value)
+  "Return non-nil if VALUE is a well-formed `feynman-chiron-textbook-sources'.
+Each entry is (NAME . SCHEMA) or (NAME . (DATABASE-URL . SCHEMA)), all
+strings — used as this variable's `safe-local-variable' predicate, so
+opening a file that sets it never needs an interactive confirmation."
+  (and (listp value)
+       (seq-every-p
+        (lambda (entry)
+          (and (consp entry)
+               (stringp (car entry))
+               (let ((spec (cdr entry)))
+                 (or (stringp spec)
+                     (and (consp spec) (stringp (car spec)) (stringp (cdr spec)))))))
+        value)))
+(put 'feynman-chiron-textbook-sources 'safe-local-variable
+     #'feynman-chiron--safe-textbook-sources-p)
 
 (defcustom feynman-chiron-backend-buffer " *feynman-backend*"
   "Buffer name for the backend process's stdout.
@@ -631,30 +643,41 @@ or {\"name\": {\"schema\": \"name\"}} for simple format."
   (unless (process-live-p process)
     (message "Feynman backend stopped: %s" event)))
 
+(defcustom feynman-chiron-response-timeout 60
+  "Seconds to wait for a `process' response from the chiron-rs agent.
+A real LLM call (especially through a CLI-proxying endpoint like
+Meridian, which spawns a fresh `claude' subprocess per request, or a
+cold embedding-model load on the first retrieval) can legitimately
+take well over 10 seconds — measured ~20s through Meridian during
+testing. Too short a timeout here surfaces as a misleading
+\"JSON parse error: (json-end-of-file)\", not a timeout message."
+  :type 'integer
+  :group 'feynman-chiron)
+
 (defun feynman-chiron--call-backend (command-dict)
   "Call backend with COMMAND-DICT, return response."
   (unless (and feynman-chiron-backend-process
                (process-live-p feynman-chiron-backend-process))
     (feynman-chiron--start-backend))
-  
+
   (let ((json-string (json-encode command-dict)))
     ;; Clear output buffer
     (with-current-buffer feynman-chiron-backend-buffer
       (erase-buffer))
-    
+
     ;; Send command
     (process-send-string feynman-chiron-backend-process
                         (concat json-string "\n"))
-    
+
     ;; Wait for a full response line. chiron-rs writes one newline-terminated
     ;; JSON object per response; waiting on buffer-size alone races against
     ;; partial pipe reads and can hand json-read a truncated object.
-    (with-timeout (10 nil)
+    (with-timeout (feynman-chiron-response-timeout nil)
       (while (not (with-current-buffer feynman-chiron-backend-buffer
                     (goto-char (point-min))
                     (search-forward "\n" nil t)))
         (sleep-for 0.05)))
-    
+
     ;; Parse response
     (with-current-buffer feynman-chiron-backend-buffer
       (goto-char (point-min))
@@ -676,15 +699,22 @@ current buffer."
              t)
          (error nil))))
 
-(defun feynman-chiron--process-with-agent (concept explanation)
-  "Process explanation through the chiron-rs agent."
+(defun feynman-chiron--process-with-agent (concept explanation thread-id)
+  "Process EXPLANATION of CONCEPT through the chiron-rs agent.
+THREAD-ID identifies the session for checkpointing — callers pass a
+stable per-concept id (see `feynman-chiron--subtree-thread-id'), not
+derived here, since this function has no reliable way to know which
+org heading/file the caller is really working on.
+
+Returns a LIST of turn strings — usually one, but `probe' splits its
+2-3 questions into separate turns so each gets its own `Chiron:'/`You:'
+pair (see `feynman-chiron--insert-response')."
   ;; chiron-rs expects textbook_sources as a JSON array of source NAMES
   ;; (Vec<String>), not the raw (name . spec) alist. Encode as a vector,
   ;; not a list: json-encode can't distinguish an empty list from nil/false
   ;; and would emit `null' instead of `[]', which chiron-rs rejects
   ;; ("invalid type: null, expected a sequence").
-  (let ((textbook-sources (vconcat (mapcar #'car feynman-chiron-textbook-sources)))
-        (thread-id (or (buffer-file-name) "default")))
+  (let ((textbook-sources (vconcat (mapcar #'car feynman-chiron-textbook-sources))))
 
     (condition-case err
         (let ((response (feynman-chiron--call-backend
@@ -694,16 +724,19 @@ current buffer."
                           (textbook_sources . ,textbook-sources)
                           (thread_id . ,thread-id)))))
           (if (alist-get 'success response)
-              (or (alist-get 'response response)
-                  (progn
-                    (message "Agent reported success but sent no response text: %S" response)
-                    "(No response text from agent.)"))
+              (or (alist-get 'turns response)
+                  (let ((single (alist-get 'response response)))
+                    (if (and single (not (string-empty-p single)))
+                        (list single)
+                      (progn
+                        (message "Agent reported success but sent no response text: %S" response)
+                        (list "(No response text from agent.)")))))
             (progn
               (message "Agent processing failed: %s" (alist-get 'error response))
-              "Error processing your explanation. Please try again.")))
+              (list "Error processing your explanation. Please try again."))))
       (error
        (message "Agent error: %s" err)
-       "Error communicating with agent."))))
+       (list "Error communicating with agent.")))))
 
 (defun feynman-chiron--stop-backend ()
   "Stop the backend process."
@@ -714,198 +747,130 @@ current buffer."
     (setq feynman-chiron-backend-process nil)
     (message "Backend stopped")))
 
-;;; State Management
+;;; Subtree-based session identity and content
 
-(defun feynman-chiron--init-state ()
-  "Initialize learning state."
-  (setq feynman-chiron-state
-        (list :concept nil
-              :stage 'waiting
-              :explanations nil
-              :gaps nil
-              :mastered nil)))
+(defun feynman-chiron--subtree-thread-id ()
+  "Get or create a stable org-id for the heading at point.
+This is the real per-concept session identity: stable across
+renames/reordering, unlike deriving anything from `buffer-file-name'
+(which is wrong here anyway — see the fixed bug in
+`feynman-chiron--process-with-agent')."
+  (save-excursion
+    (org-back-to-heading t)
+    (org-id-get-create)))
 
-(defun feynman-chiron--get-state (key)
-  "Get value from state for KEY."
-  (plist-get feynman-chiron-state key))
+(defun feynman-chiron--subtree-concept ()
+  "Get the heading text at point, as the concept name."
+  (save-excursion
+    (org-back-to-heading t)
+    (org-get-heading t t t t)))
 
-(defun feynman-chiron--set-state (key value)
-  "Set VALUE in state for KEY."
-  (setq feynman-chiron-state
-        (plist-put feynman-chiron-state key value)))
+(defun feynman-chiron--subtree-explanation ()
+  "Get the current subtree's text, as the full `Chiron:'/`You:' transcript.
+Sent whole on every submit, UNSTRIPPED — nothing here is a delta. Chiron
+sees its own prior turns as context, which is what lets it avoid repeating
+itself and notice when it already answered something (see agent.rs's
+`count_chiron_turns'/`last_student_turn')."
+  (save-excursion
+    (org-back-to-heading t)
+    ;; org-end-of-meta-data (not forward-line) so the heading's own
+    ;; PROPERTIES drawer — org-id-get-create puts an :ID: drawer right
+    ;; after the heading — is never mistaken for part of the
+    ;; explanation and resubmitted to the LLM on every future turn.
+    (let ((beg (progn (org-end-of-meta-data t) (point)))
+          (end (progn (feynman-chiron--own-body-end) (point))))
+      (string-trim (buffer-substring-no-properties beg end)))))
 
-(defun feynman-chiron--add-explanation (text)
-  "Add explanation TEXT to history."
-  (let ((explanations (feynman-chiron--get-state :explanations)))
-    (feynman-chiron--set-state :explanations (append explanations (list text)))))
+(defun feynman-chiron--own-body-end ()
+  "Move point to the end of the CURRENT heading's own body text —
+before its first child heading, if it has one. `org-end-of-subtree'
+walks past child headings too (they're part of the subtree), which is
+wrong here: a child heading is a different sub-concept, not more of
+this heading's conversation, so its content must never be read as (or
+have a response inserted into) this heading's explanation.
+`outline-next-heading' stops at the next heading of ANY level — child
+or sibling — which is exactly the boundary we want; it moves to
+`point-max' if there is no next heading at all."
+  (outline-next-heading))
 
-;;; Core Logic - All handled by backend agent
+(defun feynman-chiron--insert-response (turns)
+  "Insert TURNS (a list of strings) as separate `Chiron: '/`You: ' pairs
+at the end of the CURRENT HEADING's own body — before any child heading,
+never inside one (see `feynman-chiron--own-body-end'). Usually one turn,
+but `probe' splits its questions into several — each gets its own
+`You: ' reply slot immediately after it, rather than bunching one
+`You: ' after the whole batch.
 
-;;; Buffer Management
-
-(defun feynman-chiron--insert-readonly (text &optional face)
-  "Insert TEXT as read-only with optional FACE."
-  (let ((start (point)))
-    (insert text)
-    (add-text-properties start (point)
-                        '(read-only t front-sticky t rear-nonsticky t))
-    (when face
-      (add-text-properties start (point) (list 'face face)))))
-
-(defun feynman-chiron--insert-prompt ()
-  "Insert new prompt marker."
-  (let ((inhibit-read-only t))
-    (goto-char (point-max))
-    (unless (bolp) (insert "\n"))
-    (feynman-chiron--insert-readonly "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" 'shadow)
-    (feynman-chiron--insert-readonly "YOU:\n" '(:foreground "cyan" :weight bold))
-    (feynman-chiron--insert-readonly "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" 'shadow)
-    (setq feynman-chiron-prompt-marker (point-marker))
-    (set-marker-insertion-type feynman-chiron-prompt-marker nil)))
-
-(defun feynman-chiron--get-prompt-text ()
-  "Get text entered at current prompt."
-  (when feynman-chiron-prompt-marker
-    (buffer-substring-no-properties
-     feynman-chiron-prompt-marker
-     (point-max))))
-
-(defun feynman-chiron--clear-prompt ()
-  "Clear current prompt text."
-  (when feynman-chiron-prompt-marker
-    (let ((inhibit-read-only t))
-      (delete-region feynman-chiron-prompt-marker (point-max)))))
-
-(defun feynman-chiron--respond (text &optional face)
-  "Insert Chiron's response TEXT."
-  (let ((inhibit-read-only t))
-    (goto-char (point-max))
-    (unless (bolp) (insert "\n"))
-    (feynman-chiron--insert-readonly "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" 'shadow)
-    (feynman-chiron--insert-readonly "CHIRON:\n" '(:foreground "green" :weight bold))
-    (feynman-chiron--insert-readonly "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n" 'shadow)
-    (let ((start (point)))
-      (insert text)
-      (add-text-properties start (point)
-                          '(read-only t front-sticky t rear-nonsticky t))
-      (when face
-        (add-text-properties start (point) (list 'face face)))
-      ;; Add light background to Chiron's text
-      (add-text-properties start (point) '(face (:background "#1a1a1a"))))
-    (feynman-chiron--insert-readonly "\n\n")))
+Ordinary, editable org content — nothing here is read-only or gets
+stripped before resubmission, so there's no wrong place to type your
+answer. A blank line always follows the LAST `You: ' before whatever
+comes next (a child or sibling heading, or nothing) — without it,
+`You: ' would run directly into that heading's `*' line and break
+org's heading recognition. Point is left right after the LAST `You: ',
+ready to type."
+  (let (after-last-you)
+    (save-excursion
+      (org-back-to-heading t)
+      (feynman-chiron--own-body-end)
+      (unless (bolp) (insert "\n"))
+      (insert "\n")
+      (dolist (turn turns)
+        (insert "Chiron: " (string-trim turn) "\n\nYou: ")
+        (setq after-last-you (point))
+        (insert "\n\n")))
+    (goto-char after-last-you)))
 
 ;;; Commands
 
+;;;###autoload
 (defun feynman-chiron-submit ()
-  "Submit current prompt to Chiron."
+  "Submit the org subtree at point to Chiron.
+
+Sends the CURRENT full subtree text — the whole `Chiron:'/`You:'
+transcript so far, unstripped — as context for the heading's concept.
+Chiron's response is appended as one or more new `Chiron: ' turns, each
+followed by its own `You: ' prompt; nothing is locked read-only, and
+nothing is ever removed before resubmitting."
   (interactive)
-  (let ((input (string-trim (feynman-chiron--get-prompt-text))))
-    (when (string-empty-p input)
-      (user-error "Empty input"))
-    
-    (feynman-chiron--clear-prompt)
-    
-    ;; Show what user submitted with visual distinction
-    (let ((inhibit-read-only t))
-      (goto-char (point-max))
-      (let ((start (point)))
-        (insert input "\n")
-        (add-text-properties start (point)
-                            '(read-only t front-sticky t rear-nonsticky t face (:foreground "white")))))
-    
-    (feynman-chiron--process-input input)
-    (feynman-chiron--insert-prompt)))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "feynman-chiron-submit only works in an org-mode buffer"))
+  (unless feynman-chiron-textbook-sources
+    (user-error "No feynman-chiron-textbook-sources configured for this buffer"))
+  (let* ((concept (save-excursion (org-back-to-heading t) (feynman-chiron--subtree-concept)))
+         (thread-id (save-excursion (org-back-to-heading t) (feynman-chiron--subtree-thread-id)))
+         (explanation (save-excursion (org-back-to-heading t) (feynman-chiron--subtree-explanation))))
+    (when (string-empty-p explanation)
+      (user-error "Nothing to submit — write your explanation under this heading first"))
+    (message "Chiron: processing your explanation for \"%s\"..." concept)
+    (let ((turns (feynman-chiron--process-with-agent concept explanation thread-id)))
+      ;; Deliberately NOT wrapped in save-excursion: --insert-response
+      ;; (which finds the heading itself via org-back-to-heading) leaves
+      ;; point right after the new block, which is where a reply belongs —
+      ;; restoring the pre-submit point would put the cursor back
+      ;; inside/above the old text, inviting the next reply to land in the
+      ;; wrong place again.
+      (feynman-chiron--insert-response turns)
+      (message "Chiron: response inserted."))))
 
-(defun feynman-chiron--process-input (input)
-  "Process user INPUT through the backend agent."
-  (let* ((lines (split-string input "\n" t))
-         (first-line (car lines))
-         (parsed-concept nil)
-         (explanation input))
-
-    ;; Try to extract concept from first line
-    (when (string-match "learning about \\(.+\\)[.!]?" first-line)
-      (setq parsed-concept (match-string 1 first-line))
-      ;; Remove the "I'm learning about X" line from explanation
-      (setq explanation (string-join (cdr lines) "\n")))
-
-    (let ((concept (or parsed-concept (feynman-chiron--get-state :concept))))
-
-      ;; If still no concept, prompt for it
-      (if (null concept)
-          (feynman-chiron--respond
-           "What concept are you learning?\nStart with: 'I'm learning about [concept name]'")
-
-        ;; We have a concept - process through backend
-        (feynman-chiron--set-state :concept concept)
-        (feynman-chiron--add-explanation explanation)
-
-        (feynman-chiron--respond "Processing your explanation...")
-
-        (let ((response (feynman-chiron--process-with-agent concept explanation)))
-          (feynman-chiron--respond response))))))
-
-(defun feynman-chiron-show-progress ()
-  "Show learning progress."
-  (interactive)
-  (let ((mastered (feynman-chiron--get-state :mastered)))
-    (if (null mastered)
-        (message "No concepts mastered yet")
-      (with-current-buffer (get-buffer-create "*Feynman Progress*")
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (insert "=== Feynman Chiron Progress ===\n\n")
-          (dolist (item mastered)
-            (insert (format "✅ %s (Score: %d/10)\n"
-                          (car item)
-                          (plist-get (cdr item) :score)))
-            (insert (format "   %s\n\n"
-                          (substring (plist-get (cdr item) :explanation) 0
-                                   (min 100 (length (plist-get (cdr item) :explanation)))))))
-          (special-mode))
-        (display-buffer (current-buffer))))))
-
-(defun feynman-chiron-reset ()
-  "Reset learning session."
-  (interactive)
-  (when (y-or-n-p "Reset all progress? ")
-    (feynman-chiron--init-state)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (feynman-chiron--insert-readonly "=== Feynman Chiron ===\n\n" 'bold)
-      (feynman-chiron--insert-readonly "Learn using the Feynman Technique.\n")
-      (feynman-chiron--insert-readonly
-       "Write freely about a concept you're learning.
-Start with: \"I'm learning about [concept]\"
-Then explain it in your own words.\n\n")
-      (feynman-chiron--insert-readonly "Write your explanation:\n")
-      (feynman-chiron--insert-prompt))
-    (message "Session reset")))
-
-;;; Major Mode
+;;; Mode
 
 (defvar feynman-chiron-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") 'feynman-chiron-submit)
-    (define-key map (kbd "C-c C-p") 'feynman-chiron-show-progress)
-    (define-key map (kbd "C-c C-r") 'feynman-chiron-reset)
     (define-key map (kbd "C-c C-m") 'feynman-chiron-menu)
     map)
-  "Keymap for Feynman Chiron mode.")
+  "Keymap for `feynman-chiron-mode'.")
 
 ;;;###autoload (autoload 'feynman-chiron-menu "feynman-chiron" nil t)
 (transient-define-prefix feynman-chiron-menu ()
   "Feynman Chiron command menu.
 The entry point for everything this package does — invoke this
-(`M-x feynman-chiron-menu', or `C-c C-m' inside a Feynman Chiron
-session buffer) instead of having to remember individual command
-names. Works from any buffer, not just a session buffer."
+(`M-x feynman-chiron-menu', or `C-c C-m' with `feynman-chiron-mode'
+enabled) instead of having to remember individual command names."
   ["Feynman Chiron"
    ["Session"
-    ("s" "Start/switch to session" feynman-chiron-start)
-    ("g" "Submit explanation" feynman-chiron-submit)
-    ("p" "Show progress" feynman-chiron-show-progress)
-    ("r" "Reset session" feynman-chiron-reset)]
+    ("s" "Enable in this buffer" feynman-chiron-start)
+    ("g" "Submit heading at point" feynman-chiron-submit)]
    ["Textbooks"
     ("c" "Create schema" feynman-chiron-create-schema)
     ("i" "Ingest textbook (PDF)" feynman-chiron-ingest-textbook)
@@ -913,123 +878,57 @@ names. Works from any buffer, not just a session buffer."
    ["Backend"
     ("b" "Install/reinstall chiron-rs + chiron-ingest" feynman-chiron-install-backend)]])
 
-(define-derived-mode feynman-chiron-mode org-mode "Feynman-Chiron"
-  "Major mode for learning with Feynman Chiron.
-Based on org-mode for structured writing.
+(defface feynman-chiron-speaker-face
+  '((t :inherit bold :slant italic))
+  "Face for the `Chiron:'/`You:' speaker markers, to make turns easier
+to tell apart at a glance."
+  :group 'feynman-chiron)
+
+(defconst feynman-chiron--speaker-font-lock-keywords
+  '(("^\\(Chiron:\\|You:\\)" 1 'feynman-chiron-speaker-face))
+  "Font-lock keyword making the `Chiron:'/`You:' markers visually
+distinct (bold+italic by default, via `feynman-chiron-speaker-face').
+Deliberately DISPLAY-ONLY, added via `font-lock-add-keywords' rather
+than by inserting real org markup characters (`*bold*') into the
+buffer: the literal text `Chiron:'/`You:' at the start of a line is
+what chiron-rs's transcript parsing matches on (see agent.rs's
+`count_chiron_turns'/`last_student_turn'/`student_agrees'), so the
+buffer's actual characters must stay exactly `Chiron:'/`You:'.")
+
+;;;###autoload
+(define-minor-mode feynman-chiron-mode
+  "Minor mode for learning with Feynman Chiron, on top of `org-mode'.
+
+Enable in any org buffer with `feynman-chiron-textbook-sources' (and
+the other feynman-chiron-* buffer-local variables) set — typically via
+file-local variables or `.dir-locals.el'. One org heading is one
+concept; its subtree is your explanation, freely editable like any
+other org text. `C-c C-c' (`feynman-chiron-submit') sends the current
+subtree and appends Chiron's response as a `Chiron: ' turn, followed by
+a `You: ' prompt for your reply.
 
 \\{feynman-chiron-mode-map}"
-  (setq-local buffer-read-only t)
-  ;; Enable org features
-  (org-indent-mode 1)
-  (visual-line-mode 1))
+  :lighter " Chiron"
+  :keymap feynman-chiron-mode-map
+  (if feynman-chiron-mode
+      (font-lock-add-keywords nil feynman-chiron--speaker-font-lock-keywords)
+    (font-lock-remove-keywords nil feynman-chiron--speaker-font-lock-keywords))
+  (when (fboundp 'font-lock-flush) (font-lock-flush)))
 
 ;;;###autoload
 (defun feynman-chiron-start ()
-  "Start Feynman Chiron learning session.
-Reads per-session configuration (`feynman-chiron-database-url' and
-friends, all buffer-local) from the CALLING buffer — typically an
-org file with these set via file-local variables or `.dir-locals.el'
-— and carries it into the single shared `*Feynman Chiron*' session
-buffer, since that buffer is otherwise unrelated to whichever file
-you invoked this from and would see only unset defaults."
+  "Enable `feynman-chiron-mode' in the current buffer and ready the backend.
+There is no separate session buffer — this just turns the minor mode
+on here, in your own org file, where the dialog actually lives."
   (interactive)
-  (let ((database-url feynman-chiron-database-url)
-        (learning-schema feynman-chiron-learning-schema)
-        (textbook-sources feynman-chiron-textbook-sources)
-        (embedding-model feynman-chiron-embedding-model)
-        (provider feynman-chiron-provider)
-        (model feynman-chiron-model))
-
-    ;; Create or switch to buffer
-    (let ((buffer (get-buffer-create feynman-chiron-buffer-name)))
-      (with-current-buffer buffer
-        (feynman-chiron-mode)
-        (setq-local feynman-chiron-database-url database-url)
-        (setq-local feynman-chiron-learning-schema learning-schema)
-        (setq-local feynman-chiron-textbook-sources textbook-sources)
-        (setq-local feynman-chiron-embedding-model embedding-model)
-        (setq-local feynman-chiron-provider provider)
-        (setq-local feynman-chiron-model model)
-
-        ;; Start backend if database and learning schema configured
-        (when (and feynman-chiron-database-url feynman-chiron-learning-schema)
-          (condition-case err
-              (progn
-                (feynman-chiron--start-backend)
-                (message "Agent started"))
-            (error
-             (message "Backend unavailable: %s" err))))
-
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        
-        (feynman-chiron--insert-readonly "=== Feynman Chiron ===\n\n" 'bold)
-        
-        ;; Show provider and model
-        (feynman-chiron--insert-readonly
-         (format "Provider: %s (%s)\n"
-                (feynman-chiron--get-provider)
-                (feynman-chiron--model))
-         '(:foreground "cyan"))
-        
-        ;; Show database configuration
-        (if feynman-chiron-database-url
-            (let ((db-name (car (last (split-string feynman-chiron-database-url "/")))))
-              (feynman-chiron--insert-readonly
-               (format "Database: %s" db-name)
-               '(:foreground "yellow"))
-              (if feynman-chiron-learning-schema
-                  (feynman-chiron--insert-readonly
-                   (format " / %s\n" feynman-chiron-learning-schema)
-                   '(:foreground "green"))
-                (feynman-chiron--insert-readonly
-                 " (no learning schema set)\n"
-                 '(:foreground "red"))))
-          (feynman-chiron--insert-readonly
-           "Database: none (configure feynman-chiron-database-url)\n"
-           '(:foreground "red")))
-        
-        ;; Show textbook sources
-        (if feynman-chiron-textbook-sources
-            (progn
-              (feynman-chiron--insert-readonly
-               (format "Textbooks: %d source(s)\n\n"
-                      (length feynman-chiron-textbook-sources))
-               '(:foreground "green")))
-          (feynman-chiron--insert-readonly
-           "Textbooks: none\n\n"
-           '(:foreground "gray")))
-        
-        (feynman-chiron--insert-readonly
-         "Learn using the Feynman Technique.
-
-Write freely about a concept you're learning.
-Start with: \"I'm learning about [concept]\"
-Then explain it in your own words, as simply as possible.
-
-When done, press C-c C-c
-I'll identify gaps and help you refine.
-
-Commands:
-  C-c C-c  - Submit your explanation
-  C-c C-p  - Show progress  
-  C-c C-r  - Reset session\n\n")
-        
-        (when feynman-chiron-textbook-sources
-          (feynman-chiron--insert-readonly "✓ Textbook sources:\n" '(:foreground "green"))
-          (dolist (source feynman-chiron-textbook-sources)
-            (feynman-chiron--insert-readonly
-             (format "  - %s\n" (car source))
-             '(:foreground "green")))
-          (feynman-chiron--insert-readonly "\n"))
-        
-        (feynman-chiron--insert-readonly "Write your explanation:\n")
-        (feynman-chiron--insert-prompt))
-      
-      (feynman-chiron--init-state))
-
-    (switch-to-buffer buffer)
-    (goto-char (point-max)))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "feynman-chiron-start must be run in an org-mode buffer"))
+  (feynman-chiron-mode 1)
+  (if (and feynman-chiron-database-url feynman-chiron-learning-schema)
+      (condition-case err
+          (progn (feynman-chiron--start-backend) (message "Chiron agent ready"))
+        (error (message "Backend unavailable: %s" err)))
+    (message "feynman-chiron-mode enabled (set feynman-chiron-database-url and feynman-chiron-learning-schema to start the backend)")))
 
 ;; Ensure the backend is installed automatically, once, shortly after
 ;; Emacs is idle — not synchronously at load time (that would add a
