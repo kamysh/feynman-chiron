@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025
 
 ;; Author: Valentyn
-;; Version: 2.1.1
+;; Version: 2.1.2
 ;; Package-Requires: ((emacs "27.1") (transient "0.3.0"))
 ;; Keywords: learning, education, ai
 ;; URL: https://github.com/kamysh/feynman-chiron
