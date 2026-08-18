@@ -35,6 +35,7 @@
 
 ;;; Code:
 
+(require 'auth-source)
 (require 'json)
 (require 'lisp-mnt)
 (require 'transient)
@@ -121,7 +122,6 @@ If nil, looked up lazily from `auth-source' (host \"api.anthropic.com\")."
 
 (defun feynman-chiron--auth-source-key (host)
   "Look up a secret for HOST via `auth-source'."
-  (require 'auth-source)
   (let ((secret (plist-get (car (auth-source-search :host host :max 1)) :secret)))
     (if (functionp secret) (funcall secret) secret)))
 
